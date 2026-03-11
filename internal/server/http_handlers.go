@@ -162,7 +162,7 @@ func (s *Server) HandleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	accountID, _ := codexauth.ExtractAccountID(auth.Access)
-	s.renderOAuthResult(w, true, accountID)
+	s.renderOAuthResult(w, true, maskAccountID(accountID))
 }
 
 func (s *Server) HandleOAuthStatus(w http.ResponseWriter, r *http.Request) {
@@ -192,7 +192,7 @@ func (s *Server) HandleOAuthStatus(w http.ResponseWriter, r *http.Request) {
 	status["authorized"] = auth.Type == "oauth" && auth.Access != "" && auth.Refresh != "" && !expired
 	status["expires"] = auth.Expires
 	status["expired"] = expired
-	status["account_id"] = accountID
+	status["account_id"] = maskAccountID(accountID)
 	writeJSON(w, http.StatusOK, status)
 }
 
@@ -675,4 +675,15 @@ func htmlEscape(input string) string {
 		"'", "&#39;",
 	)
 	return replacer.Replace(strings.TrimSpace(input))
+}
+
+func maskAccountID(accountID string) string {
+	id := strings.TrimSpace(accountID)
+	if id == "" {
+		return ""
+	}
+	if len(id) <= 8 {
+		return "****"
+	}
+	return id[:4] + "****" + id[len(id)-4:]
 }

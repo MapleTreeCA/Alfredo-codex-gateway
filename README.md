@@ -15,6 +15,22 @@ Current phase focus:
 - web text/voice test page for quick dialogue verification
 - websocket STT emits both `state=interim` (streaming) and `state=final`
 
+## Development Loadmap
+
+- Full roadmap file: [dev/dev-loadmap.md](dev/dev-loadmap.md)
+- This section is an embedded preview to keep roadmap context visible in README.
+
+### Embedded Preview
+
+- Project: Alfredo is an ESP32-based hardware agent powered by this `codex-gateway`.
+- Core capabilities: voice interaction, expressions, vision, and physical articulation.
+- 2026 completed milestones: hardware selection, desktop Alfred app, initial gateway/firmware, expression system, local memory + STT/TTS in gateway.
+- Phase 1 (in progress): websocket voice stream stability, turn-taking flow, expression trigger migration, animation smoothness.
+- Phase 2: token/memory optimization, local skills (memo/calendar/mail), local-first vision modules.
+- Phase 3: servo calibration + 3D chassis integration.
+- Phase 4: MCP expansion, coding workflow automation, GSM/cloud deployment, multi-terminal support.
+- Latest debug focus: firmware-to-gateway boot path, protocol selection priority, OTA bypass, and CoreS3 default websocket alignment.
+
 ## Built-In Web Console
 
 After startup:

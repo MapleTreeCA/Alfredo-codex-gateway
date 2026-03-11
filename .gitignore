@@ -8,6 +8,10 @@
 /tmp/
 *.log
 
+# Local internal docs / private notes
+/doc/
+/dev/memory-context-recall.md
+
 # Local environment/secrets
 .env
 .env.*
