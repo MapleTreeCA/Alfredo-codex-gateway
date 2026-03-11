@@ -1,0 +1,27 @@
+# Build output
+/codex-gateway
+/bin/
+/dist/
+
+# Local runtime/temp data
+/.tmp/
+/tmp/
+*.log
+
+# Local environment/secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# OAuth / auth artifacts
+auth.json
+openai.json
+*.token
+
+# OS/editor noise
+.DS_Store
+.vscode/

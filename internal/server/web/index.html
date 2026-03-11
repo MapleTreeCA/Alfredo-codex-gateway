@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Alfredo Gateway Console</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main id="console-layout" class="console-layout">
+      <aside id="control-sidebar" class="sidebar">
+        <div class="sidebar-head">
+          <button
+            id="sidebar-toggle"
+            type="button"
+            class="ghost sidebar-toggle-btn"
+            title="Collapse sidebar"
+            aria-label="Collapse sidebar"
+            aria-expanded="true"
+          >
+            ◀
+          </button>
+        </div>
+        <div class="sidebar-body">
+          <header class="hero sidebar-hero">
+            <h1>Alfredo Gateway</h1>
+            <p>OAuth, model settings, and tools panel</p>
+          </header>
+
+          <section class="panel">
+            <h2>Quick Access</h2>
+            <div class="row">
+              <a class="link-btn" href="/runtime.html">Open Runtime Config</a>
+              <a class="link-btn" href="/memory.html">Open Memory Search</a>
+            </div>
+          </section>
+
+          <section class="panel">
+            <h2>OAuth</h2>
+            <div id="oauth-status" class="status">Loading...</div>
+            <div class="row">
+              <button id="oauth-login" type="button">Sign in with GPT OAuth</button>
+              <button id="oauth-refresh" type="button" class="ghost">Refresh Status</button>
+            </div>
+          </section>
+
+          <section class="panel">
+            <h2>Device SD Config</h2>
+            <div class="config-grid">
+              <label class="field">
+                Connected Device
+                <select id="device-select"></select>
+              </label>
+              <label class="field">
+                Reboot After Apply
+                <select id="device-reboot-select">
+                  <option value="false" selected>No</option>
+                  <option value="true">Yes</option>
+                </select>
+              </label>
+            </div>
+            <label class="field" for="sd-config-input">
+              Runtime Config JSON
+              <textarea
+                id="sd-config-input"
+                class="json-editor"
+                rows="12"
+                placeholder="Paste / edit JSON for /sdcard/alfredo.cfg"
+              ></textarea>
+            </label>
+            <div class="row">
+              <button id="device-refresh" type="button" class="ghost">Refresh Devices</button>
+              <button id="device-apply-sd" type="button">Apply To Device SD</button>
+            </div>
+            <div id="device-status" class="hint">Device: not connected</div>
+          </section>
+        </div>
+      </aside>
+
+      <section class="main-content">
+        <section class="panel chat-panel">
+          <div class="panel-head">
+            <h2>Conversation Test</h2>
+            <label class="check">
+              <input id="show-diagnostics" type="checkbox" checked />
+              Show Diagnostics
+            </label>
+          </div>
+          <div class="status-strip" aria-label="Runtime status lights">
+            <div class="status-item">
+              <span id="status-light-system" class="status-light" data-state="warn" title="Waiting for OAuth sign-in"></span>
+              <span>System</span>
+            </div>
+            <div class="status-item">
+              <span id="status-light-oauth" class="status-light" data-state="warn" title="OAuth status unknown"></span>
+              <span>OAuth</span>
+            </div>
+            <div class="status-item">
+              <span id="status-light-config" class="status-light" data-state="idle" title="Config not loaded"></span>
+              <span>Config</span>
+            </div>
+            <div class="status-item">
+              <span id="status-light-chat" class="status-light" data-state="idle" title="No chat sent yet"></span>
+              <span>Chat</span>
+            </div>
+            <div class="status-item">
+              <span id="status-light-voice" class="status-light" data-state="idle" title="Voice idle"></span>
+              <span>Voice</span>
+            </div>
+          </div>
+          <div id="model-status" class="hint">Last call: -</div>
+          <div id="diag-status" class="hint">Diagnostics: -</div>
+          <div id="chat-log" class="chat-log"></div>
+          <form id="chat-form" class="chat-form">
+            <textarea id="chat-input" rows="4" placeholder="Type text and press Enter or click Send"></textarea>
+            <div class="row">
+              <button id="send-btn" type="submit">Send Text</button>
+              <button id="record-btn" type="button" class="ghost">Start Recording</button>
+              <button id="stop-btn" type="button" class="ghost" disabled>Stop Recording</button>
+              <label class="check">
+                <input id="auto-tts" type="checkbox" checked />
+                Auto-play TTS
+              </label>
+            </div>
+          </form>
+          <div id="voice-status" class="hint">Voice: idle</div>
+        </section>
+      </section>
+    </main>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

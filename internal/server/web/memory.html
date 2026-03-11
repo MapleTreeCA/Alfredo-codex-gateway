@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Alfredo Gateway Memory</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="hero">
+        <h1>Memory Search</h1>
+        <p>Persistent chat memory is stored on disk and can be searched by session.</p>
+        <div class="row">
+          <a class="link-btn" href="/">Back To Console</a>
+        </div>
+      </header>
+
+      <section class="panel">
+        <h2>Search</h2>
+        <div class="row model-row">
+          <label class="field">
+            Session
+            <select id="memory-session-select"></select>
+          </label>
+          <label class="field">
+            Custom Session ID
+            <input id="memory-session-input" type="text" placeholder="Optional override session id" />
+          </label>
+          <label class="field">
+            Query
+            <input id="memory-query-input" type="text" placeholder="Leave blank to list recent items" />
+          </label>
+          <label class="field">
+            Limit
+            <input id="memory-limit-input" type="number" min="1" max="500" step="1" value="50" />
+          </label>
+          <label class="field">
+            Page Size
+            <select id="memory-page-size-select">
+              <option value="20">20</option>
+              <option value="50" selected>50</option>
+              <option value="100">100</option>
+            </select>
+          </label>
+          <button id="memory-search-btn" type="button">Search</button>
+          <button id="memory-recent-btn" type="button" class="ghost">Recent</button>
+          <button id="memory-refresh-btn" type="button" class="ghost">Reload Sessions</button>
+        </div>
+        <div id="memory-status" class="hint">Memory: loading sessions...</div>
+        <div id="memory-results" class="memory-list"></div>
+        <div class="row pager-row">
+          <button id="memory-prev-btn" type="button" class="ghost">Prev</button>
+          <button id="memory-next-btn" type="button" class="ghost">Next</button>
+          <span id="memory-page-status" class="hint">Page 1</span>
+        </div>
+      </section>
+    </main>
+
+    <script src="/memory.js" defer></script>
+  </body>
+</html>

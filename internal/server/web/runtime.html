@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Alfredo Gateway Runtime Config</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="hero">
+        <h1>Runtime Config</h1>
+        <p>Manage model, memory, and speech runtime settings stored in gateway SQLite.</p>
+        <div class="row">
+          <a class="link-btn" href="/">Back To Console</a>
+          <a class="link-btn" href="/memory.html">Open Memory Search</a>
+        </div>
+      </header>
+
+      <section class="panel">
+        <h2>Runtime Settings</h2>
+        <div class="row model-row">
+          <label class="field">
+            Model
+            <select id="model-select"></select>
+          </label>
+          <label class="field">
+            Custom Model
+            <input id="model-custom-input" type="text" placeholder="Optional override model id" />
+          </label>
+          <label class="field">
+            Effort
+            <select id="effort-select">
+              <option value="low">low</option>
+              <option value="medium" selected>medium</option>
+              <option value="high">high</option>
+            </select>
+          </label>
+          <label class="field">
+            Verbosity
+            <select id="verbosity-select">
+              <option value="low">low</option>
+              <option value="medium" selected>medium</option>
+              <option value="high">high</option>
+            </select>
+          </label>
+          <label class="field">
+            Max Output Tokens (TTS Cutoff)
+            <input id="max-output-tokens-input" type="number" min="1" max="8192" step="1" value="500" />
+          </label>
+          <label class="field">
+            Context Messages
+            <input id="context-messages-input" type="number" min="1" max="200" step="1" value="10" />
+          </label>
+          <label class="field">
+            Memory Recall Days
+            <input id="memory-recall-days-input" type="number" min="1" max="365" step="1" value="30" />
+          </label>
+          <label class="field">
+            Session Silence (ms)
+            <input id="session-silence-ms-input" type="number" min="200" max="10000" step="50" value="1200" />
+          </label>
+          <label class="field">
+            Session Max Turn (ms)
+            <input id="session-max-turn-ms-input" type="number" min="2000" max="120000" step="100" value="15000" />
+          </label>
+          <label class="field">
+            TTS Voice
+            <select id="tts-voice-select"></select>
+          </label>
+          <label class="field">
+            Custom Voice
+            <input id="tts-voice-custom-input" type="text" placeholder="Optional override voice name" />
+          </label>
+          <label class="field">
+            TTS Rate
+            <input id="tts-rate-input" type="number" min="80" max="500" step="5" value="220" />
+          </label>
+          <label class="field">
+            STT Interim Interval (ms)
+            <input id="stt-interim-interval-ms-input" type="number" min="200" max="10000" step="50" value="900" />
+          </label>
+          <label class="field">
+            STT Interim Min Audio (ms)
+            <input id="stt-interim-min-audio-ms-input" type="number" min="200" max="30000" step="50" value="1200" />
+          </label>
+        </div>
+        <div class="row">
+          <label class="check">
+            <input id="online-search" type="checkbox" checked />
+            Enable Web Search Tool
+          </label>
+          <label class="check">
+            <input id="stt-streaming-enabled" type="checkbox" checked />
+            Enable STT Streaming
+          </label>
+          <label class="check">
+            <input id="concise-enabled" type="checkbox" checked />
+            Enforce "Be concise."
+          </label>
+        </div>
+        <div class="row">
+          <button id="config-save" type="button">Save Config</button>
+          <button id="config-reload" type="button" class="ghost">Reload Config</button>
+        </div>
+        <div id="config-status" class="hint">Config: not loaded</div>
+      </section>
+    </main>
+
+    <script src="/runtime.js" defer></script>
+  </body>
+</html>
