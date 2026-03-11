@@ -26,8 +26,8 @@
 ## 🚀 Future Roadmap
 
 ### 🔊 Phase 1: Interaction Optimization & Communication
-* [❌] **Voice Stream Integration**: Connect Alfredo to `codex-gateway`; ensure smooth WebSocket voice collection and STT workflows.
-* [❌] **Conversation Flow**: Debug TTS playback, session intervals, silence detection, and end-of-turn logic for natural chatting.
+* [✅] **Voice Stream Integration**: Connect Alfredo to `codex-gateway`; ensure smooth WebSocket voice collection and STT workflows.
+* [✅] **Conversation Flow**: Debug TTS playback, session intervals, silence detection, and end-of-turn logic for natural chatting.
 * [❌] **Expression Migration**: Move expression control to the gateway to trigger animations based on dialogue context.
 * [❌] **Animation Refinement**: Implement smooth transitions and animations for expression sets.
 
