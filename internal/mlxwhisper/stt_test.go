@@ -41,9 +41,11 @@ printf '{"text":"transcription success"}' > "$outdir/$outname.json"
 	}
 
 	transcriber := NewTranscriber(config.Config{
-		MLXWhisperBin:   binPath,
-		MLXWhisperModel: "mlx-community/whisper-large-v3-turbo",
-		STTLanguage:     "zh-CN",
+		MLXWhisperBin:             binPath,
+		MLXWhisperModel:           "mlx-community/whisper-large-v3-turbo",
+		MLXWhisperResidentEnabled: true,
+		MLXWhisperResidentTimeout: 300 * time.Millisecond,
+		STTLanguage:               "zh-CN",
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

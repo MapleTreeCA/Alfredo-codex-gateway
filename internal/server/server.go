@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"sort"
@@ -54,6 +56,7 @@ type Server struct {
 	cfg          config.Config
 	upgrader     websocket.Upgrader
 	transcriber  transcriber
+	sttCloser    io.Closer
 	synthesizer  speechSynthesizer
 	llm          llmClient
 	localModule  *localmodule.Manager
@@ -90,13 +93,21 @@ func New(cfg config.Config) (*Server, error) {
 		return nil, fmt.Errorf("init memory store failed: %w", err)
 	}
 	runtime := defaultRuntimeConfig(cfg)
-	persistedRuntime, found, err := loadRuntimeConfigFromStore(memStore, runtime)
-	if err != nil {
-		log.Printf("load runtime config from sqlite failed, fallback to defaults: %v", err)
-	} else if found {
-		runtime = persistedRuntime
-	} else if err := saveRuntimeConfigToStore(memStore, runtime); err != nil {
-		log.Printf("seed runtime config into sqlite failed: %v", err)
+	if cfg.RuntimeConfigResetOnStart {
+		if err := saveRuntimeConfigToStore(memStore, runtime); err != nil {
+			log.Printf("reset runtime config into sqlite failed: %v", err)
+		} else {
+			log.Printf("runtime config reset on start enabled; persisted runtime replaced by defaults")
+		}
+	} else {
+		persistedRuntime, found, err := loadRuntimeConfigFromStore(memStore, runtime)
+		if err != nil {
+			log.Printf("load runtime config from sqlite failed, fallback to defaults: %v", err)
+		} else if found {
+			runtime = persistedRuntime
+		} else if err := saveRuntimeConfigToStore(memStore, runtime); err != nil {
+			log.Printf("seed runtime config into sqlite failed: %v", err)
+		}
 	}
 	log.Printf(
 		"runtime config loaded model=%s effort=%s verbosity=%s online=%t concise=%t max_output_tokens=%d context_messages=%d memory_recall_days=%d tts_voice=%q tts_rate=%d session_silence_ms=%d session_max_turn_ms=%d stt_streaming_enabled=%t stt_interim_interval_ms=%d stt_interim_min_audio_ms=%d",
@@ -135,6 +146,7 @@ func New(cfg config.Config) (*Server, error) {
 	default:
 		stt = openai.NewTranscriber(cfg)
 	}
+	sttCloser, _ := any(stt).(io.Closer)
 	var synthesizer speechSynthesizer
 	switch cfg.TTSProvider {
 	case "openclaw":
@@ -148,6 +160,7 @@ func New(cfg config.Config) (*Server, error) {
 	return &Server{
 		cfg:          cfg,
 		transcriber:  stt,
+		sttCloser:    sttCloser,
 		synthesizer:  synthesizer,
 		llm:          client,
 		localModule:  localmodule.New(cfg),
@@ -258,8 +271,19 @@ func (s *Server) authorized(r *http.Request) bool {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	var errs []string
+	if s.sttCloser != nil {
+		if err := s.sttCloser.Close(); err != nil {
+			errs = append(errs, fmt.Sprintf("close stt transcriber failed: %v", err))
+		}
+	}
 	if s.localModule != nil {
-		return s.localModule.Shutdown(ctx)
+		if err := s.localModule.Shutdown(ctx); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
 	}
 	return nil
 }

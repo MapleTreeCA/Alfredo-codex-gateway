@@ -223,7 +223,7 @@ func (c *Client) generate(
 		model = normalizeModel(raw)
 	}
 	effort := normalizeReasoningEffort(options.Effort)
-	verbosity := normalizeTextVerbosity(options.Verbosity)
+	verbosity := NormalizeTextVerbosityForModel(model, options.Verbosity)
 	contextLimit := c.resolveContextLimit(options.ContextMessages)
 	recallDays := c.resolveRecallDays(options.MemoryRecallDays)
 	history := c.loadHistory(sessionID, contextLimit)
@@ -649,6 +649,29 @@ func normalizeTextVerbosity(raw string) string {
 	default:
 		return defaultTextVerbosity
 	}
+}
+
+func SupportedTextVerbosityOptions(model string) []string {
+	switch normalizeModel(model) {
+	case "gpt-5.2-codex":
+		return []string{"medium"}
+	default:
+		return []string{"low", "medium", "high"}
+	}
+}
+
+func NormalizeTextVerbosityForModel(model, raw string) string {
+	verbosity := normalizeTextVerbosity(raw)
+	options := SupportedTextVerbosityOptions(model)
+	for _, option := range options {
+		if verbosity == option {
+			return verbosity
+		}
+	}
+	if len(options) > 0 {
+		return options[0]
+	}
+	return defaultTextVerbosity
 }
 
 func normalizeOnlineFlag(raw string) bool {

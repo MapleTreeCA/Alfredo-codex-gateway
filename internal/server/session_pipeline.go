@@ -71,6 +71,31 @@ type defaultTurnPipeline struct {
 
 var sentenceChunkPattern = regexp.MustCompile(`[^.!?。！？]+[.!?。！？]*`)
 
+const ttsStreamingChunkMaxRunes = 120
+
+var wakeWordAutoReplyChunks = []string{
+	"Hi there.",
+	"I'm listening.",
+}
+
+const systemCommandStandby = "standby"
+
+var standbyVoiceCommandSet = map[string]struct{}{
+	"go sleep":    {},
+	"go to sleep": {},
+	"sleep":       {},
+	"stop":        {},
+	"shutup":      {},
+	"shut up":     {},
+}
+
+type ttsChunkResult struct {
+	chunk    string
+	wav      []byte
+	duration time.Duration
+	err      error
+}
+
 func newDefaultTurnPipeline(server *Server) turnPipeline {
 	return &defaultTurnPipeline{
 		ingress:  defaultIngressStage{},
@@ -82,6 +107,11 @@ func newDefaultTurnPipeline(server *Server) turnPipeline {
 }
 
 func (p *defaultTurnPipeline) Run(ctx context.Context, session *Session, turn *turnBuffer, reason string) {
+	if shouldUseWakeWordAutoReply(turn) {
+		p.runWakeWordAutoReply(ctx, session, turn, reason)
+		return
+	}
+
 	stageStartedAt := time.Now()
 
 	ingress, err := p.ingress.Process(turn)
@@ -95,14 +125,22 @@ func (p *defaultTurnPipeline) Run(ctx context.Context, session *Session, turn *t
 	}
 
 	stageStartedAt = time.Now()
-	transcript, err := p.stt.Process(ctx, ingress.wav)
-	if err != nil {
-		_ = session.sendAlert("error", truncateForSpeech(err.Error()), "sad")
-		log.Printf("session=%s turn=%d stt failed: %v", session.id, turn.id, err)
-		return
+	transcript := ""
+	reusedInterim := false
+	if candidate, ok := shouldReuseInterimTranscriptForFinal(turn, reason); ok {
+		transcript = candidate
+		reusedInterim = true
+	} else {
+		var err error
+		transcript, err = p.stt.Process(ctx, ingress.wav)
+		if err != nil {
+			_ = session.sendAlert("error", truncateForSpeech(err.Error()), "sad")
+			log.Printf("session=%s turn=%d stt failed: %v", session.id, turn.id, err)
+			return
+		}
 	}
 	rawTranscript := transcript
-	if shouldRetryWeakTranscript(turn, transcript) {
+	if !reusedInterim && shouldRetryWeakTranscript(turn, transcript) {
 		retryText, retryErr := retryTranscriptWithStrongGain(ctx, p.stt, turn)
 		if retryErr != nil {
 			log.Printf("session=%s turn=%d stt retry failed: %v", session.id, turn.id, retryErr)
@@ -127,6 +165,22 @@ func (p *defaultTurnPipeline) Run(ctx context.Context, session *Session, turn *t
 			ellipsizeLogText(collapsedTranscript, 80),
 		)
 		transcript = collapsedTranscript
+	}
+	if shouldDropClippedWakeTurn(turn) {
+		log.Printf(
+			"session=%s turn=%d drop reason=clipped_wake_turn transcript=%q speech_frames=%d max_frame_peak=%d max_frame_avg=%d ratio=%.2f interim_updates=%d wake_word=%q",
+			session.id,
+			turn.id,
+			ellipsizeLogText(transcript, 80),
+			turn.speechFrameCount,
+			turn.maxFramePeak,
+			turn.maxFrameAvg,
+			turnSpeechFrameRatio(turn),
+			turn.interimUpdates,
+			turn.wakeWord,
+		)
+		session.requestTurnRestart(turn.mode)
+		return
 	}
 	if shouldDropLanguageMismatchTranscript(session.server.cfg.STTLanguage, turn, transcript) {
 		log.Printf(
@@ -176,6 +230,38 @@ func (p *defaultTurnPipeline) Run(ctx context.Context, session *Session, turn *t
 		session.requestTurnRestart(turn.mode)
 		return
 	}
+	if shouldDropSevereClippedNoiseTurn(turn) {
+		log.Printf(
+			"session=%s turn=%d drop reason=severe_clipped_noise transcript=%q speech_frames=%d max_frame_peak=%d max_frame_avg=%d ratio=%.2f interim_updates=%d wake_word=%q",
+			session.id,
+			turn.id,
+			ellipsizeLogText(transcript, 80),
+			turn.speechFrameCount,
+			turn.maxFramePeak,
+			turn.maxFrameAvg,
+			turnSpeechFrameRatio(turn),
+			turn.interimUpdates,
+			turn.wakeWord,
+		)
+		session.requestTurnRestart(turn.mode)
+		return
+	}
+	if shouldDropSilenceTimeoutTranscript(reason, turn, transcript) {
+		log.Printf(
+			"session=%s turn=%d drop reason=silence_timeout_low_conf transcript=%q speech_frames=%d max_frame_peak=%d max_frame_avg=%d ratio=%.2f interim_updates=%d wake_word=%q",
+			session.id,
+			turn.id,
+			ellipsizeLogText(transcript, 80),
+			turn.speechFrameCount,
+			turn.maxFramePeak,
+			turn.maxFrameAvg,
+			turnSpeechFrameRatio(turn),
+			turn.interimUpdates,
+			turn.wakeWord,
+		)
+		session.requestTurnRestart(turn.mode)
+		return
+	}
 	if shouldDropMaxTurnTimeoutTranscript(reason, turn, transcript) {
 		log.Printf(
 			"session=%s turn=%d drop reason=max_turn_timeout_low_conf transcript=%q speech_frames=%d max_frame_peak=%d max_frame_avg=%d ratio=%.2f interim_updates=%d",
@@ -191,19 +277,54 @@ func (p *defaultTurnPipeline) Run(ctx context.Context, session *Session, turn *t
 		session.requestTurnRestart(turn.mode)
 		return
 	}
-	log.Printf(
-		"session=%s turn=%d stt ok duration=%s text=%q",
-		session.id,
-		turn.id,
-		time.Since(stageStartedAt).Round(time.Millisecond),
-		ellipsizeLogText(transcript, 120),
-	)
+	if reusedInterim {
+		log.Printf(
+			"session=%s turn=%d stt reused_interim duration=%s text=%q interim_updates=%d interim_frames=%d total_frames=%d",
+			session.id,
+			turn.id,
+			time.Since(stageStartedAt).Round(time.Millisecond),
+			ellipsizeLogText(transcript, 120),
+			turn.interimUpdates,
+			turn.interimFrameLen,
+			len(turn.frames),
+		)
+	} else {
+		log.Printf(
+			"session=%s turn=%d stt ok duration=%s text=%q",
+			session.id,
+			turn.id,
+			time.Since(stageStartedAt).Round(time.Millisecond),
+			ellipsizeLogText(transcript, 120),
+		)
+	}
 	if err := session.sendPipelineJSON(ctx, turn.id, map[string]any{
 		"session_id": session.id,
 		"type":       "stt",
 		"state":      "final",
 		"text":       transcript,
 	}); err != nil {
+		return
+	}
+	if matched, command := shouldShortcutToStandby(transcript); matched {
+		if err := session.sendSystemCommand(systemCommandStandby, nil, false); err != nil {
+			_ = session.sendAlert("error", "Failed to enter standby", "sad")
+			log.Printf(
+				"session=%s turn=%d standby shortcut failed command=%q transcript=%q: %v",
+				session.id,
+				turn.id,
+				command,
+				ellipsizeLogText(transcript, 120),
+				err,
+			)
+			return
+		}
+		log.Printf(
+			"session=%s turn=%d standby shortcut hit command=%q transcript=%q",
+			session.id,
+			turn.id,
+			command,
+			ellipsizeLogText(transcript, 120),
+		)
 		return
 	}
 
@@ -281,47 +402,16 @@ func (p *defaultTurnPipeline) Run(ctx context.Context, session *Session, turn *t
 		return
 	}
 
-	stageStartedAt = time.Now()
 	ttsOptions := ttsSynthesisOptions{
 		Voice: runtime.TTSVoice,
 		Rate:  runtime.TTSRate,
 	}
-	speechWAV, err := p.tts.Process(ctx, spokenText, ttsOptions)
-	if err != nil {
-		_ = session.sendAlert("error", truncateForSpeech(err.Error()), "sad")
-		log.Printf("session=%s turn=%d tts failed: %v", session.id, turn.id, err)
-		return
+	ttsChunks := splitTTSTextForStreaming(spokenText, ttsStreamingChunkMaxRunes)
+	if len(ttsChunks) == 0 {
+		ttsChunks = []string{spokenText}
 	}
-	log.Printf(
-		"session=%s turn=%d tts ok duration=%s wav_bytes=%d voice=%q rate=%d",
-		session.id,
-		turn.id,
-		time.Since(stageStartedAt).Round(time.Millisecond),
-		len(speechWAV),
-		ttsOptions.Voice,
-		ttsOptions.Rate,
-	)
 
-	downlink, err := p.downlink.Process(
-		speechWAV,
-		session.downlinkSampleRate,
-		session.server.cfg.OpusFrameDuration,
-		session.server.cfg.DownlinkOpusBitrate,
-	)
-	if err != nil {
-		_ = session.sendAlert("error", truncateForSpeech(err.Error()), "sad")
-		log.Printf("session=%s turn=%d downlink failed: %v", session.id, turn.id, err)
-		return
-	}
-	log.Printf(
-		"session=%s turn=%d downlink opus_frames=%d sample_rate=%d bitrate=%d",
-		session.id,
-		turn.id,
-		len(downlink.frames),
-		downlink.sampleRate,
-		session.server.cfg.DownlinkOpusBitrate,
-	)
-
+	remainingFrameBudget := -1
 	if maxDuration := session.server.cfg.TTSMaxDuration; maxDuration > 0 && session.server.cfg.OpusFrameDuration > 0 {
 		frameStep := time.Duration(session.server.cfg.OpusFrameDuration) * time.Millisecond
 		maxFrames := int(maxDuration / frameStep)
@@ -331,35 +421,154 @@ func (p *defaultTurnPipeline) Run(ctx context.Context, session *Session, turn *t
 		if maxFrames < 1 {
 			maxFrames = 1
 		}
-		if len(downlink.frames) > maxFrames {
-			originalFrames := len(downlink.frames)
-			downlink.frames = downlink.frames[:maxFrames]
-			log.Printf(
-				"session=%s turn=%d tts downlink truncated max_duration=%s frame_ms=%d original_frames=%d sent_frames=%d",
-				session.id,
-				turn.id,
-				maxDuration.Round(time.Millisecond),
-				session.server.cfg.OpusFrameDuration,
-				originalFrames,
-				len(downlink.frames),
-			)
-		}
+		remainingFrameBudget = maxFrames
 	}
 
-	for i, frame := range downlink.frames {
-		if err := session.sendBinary(ctx, turn.id, frame); err != nil {
+	ttsStreamStartedAt := time.Now()
+	totalWAVBytes := 0
+	totalOpusFrames := 0
+	totalSentFrames := 0
+	firstAudioDelay := time.Duration(0)
+	firstFrameSent := false
+	truncatedByDuration := false
+	truncatedChunkIndex := 0
+	truncatedOriginalFrames := 0
+
+	ttsCtx, cancelTTS := context.WithCancel(ctx)
+	defer cancelTTS()
+
+	currentChunk := startTTSChunkSynthesis(ttsCtx, p.tts, ttsChunks[0], ttsOptions)
+	for chunkIndex := 0; chunkIndex < len(ttsChunks); chunkIndex++ {
+		chunkResult, waitErr := awaitTTSChunkSynthesis(ctx, currentChunk)
+		if waitErr != nil {
+			_ = session.sendAlert("error", truncateForSpeech(waitErr.Error()), "sad")
+			log.Printf("session=%s turn=%d tts failed: %v", session.id, turn.id, waitErr)
 			return
 		}
-		// Stream frames at real-time pace to avoid overflowing device playback
-		// queues when replies are long (for example, slower TTS rates).
-		if i < len(downlink.frames)-1 && session.server.cfg.OpusFrameDuration > 0 {
-			select {
-			case <-ctx.Done():
+		var nextChunk <-chan ttsChunkResult
+		if chunkIndex+1 < len(ttsChunks) {
+			nextChunk = startTTSChunkSynthesis(ttsCtx, p.tts, ttsChunks[chunkIndex+1], ttsOptions)
+		}
+		if chunkResult.err != nil {
+			_ = session.sendAlert("error", truncateForSpeech(chunkResult.err.Error()), "sad")
+			log.Printf(
+				"session=%s turn=%d tts chunk=%d/%d failed: %v",
+				session.id,
+				turn.id,
+				chunkIndex+1,
+				len(ttsChunks),
+				chunkResult.err,
+			)
+			return
+		}
+		totalWAVBytes += len(chunkResult.wav)
+		log.Printf(
+			"session=%s turn=%d tts chunk=%d/%d ok duration=%s wav_bytes=%d chunk_chars=%d voice=%q rate=%d",
+			session.id,
+			turn.id,
+			chunkIndex+1,
+			len(ttsChunks),
+			chunkResult.duration.Round(time.Millisecond),
+			len(chunkResult.wav),
+			utf8.RuneCountInString(chunkResult.chunk),
+			ttsOptions.Voice,
+			ttsOptions.Rate,
+		)
+
+		downlink, err := p.downlink.Process(
+			chunkResult.wav,
+			session.downlinkSampleRate,
+			session.server.cfg.OpusFrameDuration,
+			session.server.cfg.DownlinkOpusBitrate,
+		)
+		if err != nil {
+			_ = session.sendAlert("error", truncateForSpeech(err.Error()), "sad")
+			log.Printf("session=%s turn=%d downlink failed: %v", session.id, turn.id, err)
+			return
+		}
+		totalOpusFrames += len(downlink.frames)
+		log.Printf(
+			"session=%s turn=%d downlink chunk=%d/%d opus_frames=%d sample_rate=%d bitrate=%d",
+			session.id,
+			turn.id,
+			chunkIndex+1,
+			len(ttsChunks),
+			len(downlink.frames),
+			downlink.sampleRate,
+			session.server.cfg.DownlinkOpusBitrate,
+		)
+
+		framesToSend := downlink.frames
+		if remainingFrameBudget >= 0 {
+			if remainingFrameBudget <= 0 {
+				truncatedByDuration = true
+				truncatedChunkIndex = chunkIndex + 1
+				truncatedOriginalFrames = len(downlink.frames)
+				break
+			}
+			if len(framesToSend) > remainingFrameBudget {
+				truncatedByDuration = true
+				truncatedChunkIndex = chunkIndex + 1
+				truncatedOriginalFrames = len(downlink.frames)
+				framesToSend = framesToSend[:remainingFrameBudget]
+			}
+			remainingFrameBudget -= len(framesToSend)
+		}
+
+		for i, frame := range framesToSend {
+			if err := session.sendBinary(ctx, turn.id, frame); err != nil {
 				return
-			case <-time.After(time.Duration(session.server.cfg.OpusFrameDuration) * time.Millisecond):
+			}
+			if !firstFrameSent {
+				firstFrameSent = true
+				firstAudioDelay = time.Since(ttsStreamStartedAt)
+			}
+			// Stream frames at real-time pace to avoid overflowing device playback
+			// queues when replies are long (for example, slower TTS rates).
+			if i < len(framesToSend)-1 && session.server.cfg.OpusFrameDuration > 0 {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(time.Duration(session.server.cfg.OpusFrameDuration) * time.Millisecond):
+				}
 			}
 		}
+		totalSentFrames += len(framesToSend)
+		if truncatedByDuration {
+			break
+		}
+		currentChunk = nextChunk
 	}
+
+	if truncatedByDuration {
+		log.Printf(
+			"session=%s turn=%d tts downlink truncated max_duration=%s frame_ms=%d chunk=%d original_frames=%d sent_frames=%d",
+			session.id,
+			turn.id,
+			session.server.cfg.TTSMaxDuration.Round(time.Millisecond),
+			session.server.cfg.OpusFrameDuration,
+			truncatedChunkIndex,
+			truncatedOriginalFrames,
+			totalSentFrames,
+		)
+	}
+	if !firstFrameSent {
+		firstAudioDelay = time.Since(ttsStreamStartedAt)
+	}
+	log.Printf(
+		"session=%s turn=%d tts stream ok chunks=%d first_audio_delay=%s wav_bytes=%d opus_frames=%d sent_frames=%d duration=%s voice=%q rate=%d truncated=%t",
+		session.id,
+		turn.id,
+		len(ttsChunks),
+		firstAudioDelay.Round(time.Millisecond),
+		totalWAVBytes,
+		totalOpusFrames,
+		totalSentFrames,
+		time.Since(ttsStreamStartedAt).Round(time.Millisecond),
+		ttsOptions.Voice,
+		ttsOptions.Rate,
+		truncatedByDuration,
+	)
 
 	log.Printf(
 		"session=%s turn=%d done reason=%s transcript_bytes=%d reply_chars=%d duration=%s",
@@ -370,6 +579,166 @@ func (p *defaultTurnPipeline) Run(ctx context.Context, session *Session, turn *t
 		len(reply),
 		time.Since(turn.startedAt).Round(time.Millisecond),
 	)
+}
+
+func shouldUseWakeWordAutoReply(turn *turnBuffer) bool {
+	if turn == nil {
+		return false
+	}
+	return strings.TrimSpace(turn.wakeWord) != ""
+}
+
+func (p *defaultTurnPipeline) runWakeWordAutoReply(
+	ctx context.Context,
+	session *Session,
+	turn *turnBuffer,
+	reason string,
+) {
+	runtime := session.server.getRuntimeConfig()
+	transcript := strings.TrimSpace(turn.wakeWord)
+	reply := strings.Join(wakeWordAutoReplyChunks, " ")
+	// Wake-word gating/noise filtering should happen on device side.
+	// Backend must always honor an explicit wake-word turn and play local TTS ack.
+
+	log.Printf(
+		"session=%s turn=%d wake_word auto reply enabled wake_word=%q reason=%s",
+		session.id,
+		turn.id,
+		transcript,
+		reason,
+	)
+
+	if err := session.sendPipelineJSON(ctx, turn.id, map[string]any{
+		"session_id": session.id,
+		"type":       "stt",
+		"state":      "final",
+		"text":       transcript,
+	}); err != nil {
+		return
+	}
+
+	if err := session.sendPipelineJSON(ctx, turn.id, map[string]any{
+		"session_id": session.id,
+		"type":       "llm",
+		"emotion":    "neutral",
+		"text":       reply,
+	}); err != nil {
+		return
+	}
+
+	if err := session.sendTTSStart(ctx, turn.id); err != nil {
+		return
+	}
+	defer session.sendTTSStop(turn.id)
+
+	if err := session.sendPipelineJSON(ctx, turn.id, map[string]any{
+		"session_id": session.id,
+		"type":       "tts",
+		"state":      "sentence_start",
+		"text":       reply,
+	}); err != nil {
+		return
+	}
+
+	ttsOptions := ttsSynthesisOptions{
+		Voice: runtime.TTSVoice,
+		Rate:  runtime.TTSRate,
+	}
+
+	totalFrames := 0
+	totalWavBytes := 0
+	for i, chunk := range wakeWordAutoReplyChunks {
+		stageStartedAt := time.Now()
+		wav, err := p.tts.Process(ctx, chunk, ttsOptions)
+		if err != nil {
+			_ = session.sendAlert("error", truncateForSpeech(err.Error()), "sad")
+			log.Printf("session=%s turn=%d wake_word tts chunk=%d/%d failed: %v", session.id, turn.id, i+1, len(wakeWordAutoReplyChunks), err)
+			return
+		}
+		totalWavBytes += len(wav)
+		log.Printf(
+			"session=%s turn=%d wake_word tts chunk=%d/%d ok duration=%s wav_bytes=%d text=%q voice=%q rate=%d",
+			session.id,
+			turn.id,
+			i+1,
+			len(wakeWordAutoReplyChunks),
+			time.Since(stageStartedAt).Round(time.Millisecond),
+			len(wav),
+			chunk,
+			ttsOptions.Voice,
+			ttsOptions.Rate,
+		)
+
+		downlink, err := p.downlink.Process(
+			wav,
+			session.downlinkSampleRate,
+			session.server.cfg.OpusFrameDuration,
+			session.server.cfg.DownlinkOpusBitrate,
+		)
+		if err != nil {
+			_ = session.sendAlert("error", truncateForSpeech(err.Error()), "sad")
+			log.Printf("session=%s turn=%d wake_word downlink chunk=%d/%d failed: %v", session.id, turn.id, i+1, len(wakeWordAutoReplyChunks), err)
+			return
+		}
+		totalFrames += len(downlink.frames)
+		for frameIndex, frame := range downlink.frames {
+			if err := session.sendBinary(ctx, turn.id, frame); err != nil {
+				return
+			}
+			if frameIndex < len(downlink.frames)-1 && session.server.cfg.OpusFrameDuration > 0 {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(time.Duration(session.server.cfg.OpusFrameDuration) * time.Millisecond):
+				}
+			}
+		}
+	}
+
+	log.Printf(
+		"session=%s turn=%d wake_word done reason=%s wake_word=%q reply=%q tts_chunks=%d wav_bytes=%d opus_frames=%d duration=%s",
+		session.id,
+		turn.id,
+		reason,
+		transcript,
+		reply,
+		len(wakeWordAutoReplyChunks),
+		totalWavBytes,
+		totalFrames,
+		time.Since(turn.startedAt).Round(time.Millisecond),
+	)
+}
+
+func shouldReuseInterimTranscriptForFinal(turn *turnBuffer, reason string) (string, bool) {
+	if turn == nil {
+		return "", false
+	}
+	if reason == "max_turn_timeout" {
+		return "", false
+	}
+	if turn.interimInFlight || turn.interimUpdates <= 0 {
+		return "", false
+	}
+	text := strings.TrimSpace(turn.interimLastText)
+	if text == "" {
+		return "", false
+	}
+	if turn.interimFrameLen <= 0 || turn.interimFrameLen > len(turn.frames) {
+		return "", false
+	}
+	// Only reuse when no additional speech was detected after the interim snapshot.
+	if turn.speechFrameCount > turn.interimLastSpeechFrameCount {
+		return "", false
+	}
+	tailFrames := len(turn.frames) - turn.interimFrameLen
+	if tailFrames < 0 {
+		return "", false
+	}
+	maxTailFrames := minimumInterimFrames(1200*time.Millisecond, turn.frameDurationMS) + 2
+	if tailFrames > maxTailFrames {
+		return "", false
+	}
+	return text, true
 }
 
 type defaultIngressStage struct{}
@@ -471,6 +840,133 @@ func (defaultDownlinkStage) Process(
 		frames:     frames,
 		sampleRate: mono.SampleRate,
 	}, nil
+}
+
+func startTTSChunkSynthesis(
+	ctx context.Context,
+	stage ttsStage,
+	text string,
+	options ttsSynthesisOptions,
+) <-chan ttsChunkResult {
+	resultCh := make(chan ttsChunkResult, 1)
+	chunk := strings.TrimSpace(text)
+	go func() {
+		startedAt := time.Now()
+		wav, err := stage.Process(ctx, chunk, options)
+		resultCh <- ttsChunkResult{
+			chunk:    chunk,
+			wav:      wav,
+			duration: time.Since(startedAt),
+			err:      err,
+		}
+	}()
+	return resultCh
+}
+
+func awaitTTSChunkSynthesis(
+	ctx context.Context,
+	resultCh <-chan ttsChunkResult,
+) (ttsChunkResult, error) {
+	select {
+	case <-ctx.Done():
+		return ttsChunkResult{}, ctx.Err()
+	case result := <-resultCh:
+		return result, nil
+	}
+}
+
+func splitTTSTextForStreaming(text string, maxRunes int) []string {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return nil
+	}
+	if maxRunes <= 0 {
+		maxRunes = ttsStreamingChunkMaxRunes
+	}
+
+	parts := sentenceChunkPattern.FindAllString(trimmed, -1)
+	if len(parts) == 0 {
+		return splitLongTTSText(trimmed, maxRunes)
+	}
+
+	chunks := make([]string, 0, len(parts))
+	for _, part := range parts {
+		candidate := strings.TrimSpace(part)
+		if candidate == "" {
+			continue
+		}
+		if utf8.RuneCountInString(candidate) <= maxRunes {
+			chunks = append(chunks, candidate)
+			continue
+		}
+		chunks = append(chunks, splitLongTTSText(candidate, maxRunes)...)
+	}
+	if len(chunks) == 0 {
+		return splitLongTTSText(trimmed, maxRunes)
+	}
+	return chunks
+}
+
+func splitLongTTSText(text string, maxRunes int) []string {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return nil
+	}
+	if maxRunes <= 0 || utf8.RuneCountInString(trimmed) <= maxRunes {
+		return []string{trimmed}
+	}
+
+	words := strings.Fields(trimmed)
+	if len(words) <= 1 {
+		runes := []rune(trimmed)
+		chunks := make([]string, 0, (len(runes)+maxRunes-1)/maxRunes)
+		for len(runes) > 0 {
+			n := maxRunes
+			if n > len(runes) {
+				n = len(runes)
+			}
+			chunk := strings.TrimSpace(string(runes[:n]))
+			if chunk != "" {
+				chunks = append(chunks, chunk)
+			}
+			runes = runes[n:]
+		}
+		return chunks
+	}
+
+	chunks := make([]string, 0, len(words))
+	current := ""
+	currentRunes := 0
+	for _, word := range words {
+		wordRunes := utf8.RuneCountInString(word)
+		if current == "" {
+			if wordRunes > maxRunes {
+				chunks = append(chunks, splitLongTTSText(word, maxRunes)...)
+				continue
+			}
+			current = word
+			currentRunes = wordRunes
+			continue
+		}
+		if currentRunes+1+wordRunes <= maxRunes {
+			current += " " + word
+			currentRunes += 1 + wordRunes
+			continue
+		}
+		chunks = append(chunks, current)
+		if wordRunes > maxRunes {
+			chunks = append(chunks, splitLongTTSText(word, maxRunes)...)
+			current = ""
+			currentRunes = 0
+			continue
+		}
+		current = word
+		currentRunes = wordRunes
+	}
+	if current != "" {
+		chunks = append(chunks, current)
+	}
+	return chunks
 }
 
 func truncateTTSTextByMaxOutputTokens(text string, maxOutputTokens int) (string, bool) {
@@ -666,6 +1162,44 @@ func collapseRepeatedSentences(text string) string {
 	return strings.TrimSpace(strings.Join(collapsed, " "))
 }
 
+func shouldShortcutToStandby(transcript string) (bool, string) {
+	normalized := normalizeVoiceCommandForIntent(transcript)
+	if normalized == "" {
+		return false, ""
+	}
+	parts := strings.Fields(normalized)
+	if len(parts) < 2 || parts[0] != "alfredo" {
+		return false, ""
+	}
+	command := strings.Join(parts[1:], " ")
+	if _, ok := standbyVoiceCommandSet[command]; ok {
+		return true, command
+	}
+	return false, ""
+}
+
+func normalizeVoiceCommandForIntent(text string) string {
+	value := strings.ToLower(strings.TrimSpace(text))
+	if value == "" {
+		return ""
+	}
+	replacer := strings.NewReplacer(
+		",", " ",
+		".", " ",
+		"!", " ",
+		"?", " ",
+		";", " ",
+		":", " ",
+		"，", " ",
+		"。", " ",
+		"！", " ",
+		"？", " ",
+		"、", " ",
+	)
+	value = replacer.Replace(value)
+	return strings.Join(strings.Fields(value), " ")
+}
+
 func isCommonHallucinatedPhrase(text string) bool {
 	switch text {
 	case "thankyou",
@@ -781,6 +1315,143 @@ func shouldDropMaxTurnTimeoutTranscript(reason string, turn *turnBuffer, transcr
 		return true
 	}
 	return false
+}
+
+func shouldDropSilenceTimeoutTranscript(reason string, turn *turnBuffer, transcript string) bool {
+	if reason != "silence_timeout" || turn == nil {
+		return false
+	}
+	cleaned := normalizeTranscript(transcript)
+	if cleaned == "" {
+		return true
+	}
+	if turn.interimUpdates > 0 {
+		return false
+	}
+	frameCount := len(turn.frames)
+	if frameCount == 0 {
+		return false
+	}
+	ratio := turnSpeechFrameRatio(turn)
+	if ratio < 0.98 {
+		if frameCount <= 40 && ratio >= 0.75 && isMostlyRepeatedWord(transcript) {
+			return true
+		}
+		return false
+	}
+	lowEnergy := turn.maxFrameAvg < 160 && turn.maxFramePeak < 1600
+	// Clipped bursts (common when speaker echo or wake-word false trigger) should
+	// not pass as valid user speech for ultra-short transcripts.
+	saturated := turn.maxFrameAvg >= 8000 || turn.maxFramePeak >= 32000
+	if saturated {
+		if frameCount > 120 {
+			return false
+		}
+	} else if frameCount > 24 {
+		return false
+	}
+	if !lowEnergy && !saturated {
+		return false
+	}
+	if isCommonHallucinatedPhrase(cleaned) {
+		return true
+	}
+	if frameCount <= 40 && isMostlyRepeatedWord(transcript) {
+		return true
+	}
+	if saturated {
+		if isMostlyRepeatedWord(transcript) {
+			return true
+		}
+		if turn.maxFrameAvg >= 9000 && frameCount <= 40 {
+			return true
+		}
+		return utf8.RuneCountInString(cleaned) <= 12
+	}
+	// Keep this narrow: drop only very short transcript on suspicious acoustics.
+	if utf8.RuneCountInString(cleaned) <= 8 {
+		return true
+	}
+	return utf8.RuneCountInString(cleaned) <= 24
+}
+
+func shouldDropClippedWakeTurn(turn *turnBuffer) bool {
+	if turn == nil {
+		return false
+	}
+	if strings.TrimSpace(turn.wakeWord) == "" {
+		return false
+	}
+	if len(turn.frames) == 0 || len(turn.frames) > 160 {
+		return false
+	}
+	if turnSpeechFrameRatio(turn) < 0.9 {
+		return false
+	}
+	if turn.maxFramePeak < 32000 {
+		return false
+	}
+	// Strong clipping across the whole turn usually means wake-word false trigger
+	// plus playback/noise leakage rather than real speech.
+	return turn.maxFrameAvg >= 8000
+}
+
+func shouldDropSevereClippedNoiseTurn(turn *turnBuffer) bool {
+	if turn == nil {
+		return false
+	}
+	if strings.TrimSpace(turn.wakeWord) != "" {
+		return false
+	}
+	// Treat fully clipped high-average turns as noise/echo leakage.
+	return turn.maxFramePeak >= 32000 && turn.maxFrameAvg >= 10000
+}
+
+func shouldDropWakeNoiseTurn(session *Session, turn *turnBuffer) bool {
+	if session == nil || turn == nil {
+		return false
+	}
+	if strings.TrimSpace(turn.wakeWord) == "" {
+		return false
+	}
+	// Always reject severely clipped wake turns: these are almost always
+	// speaker leakage/noise bursts falsely decoded as wake words.
+	if turn.maxFramePeak >= 32760 && turn.maxFrameAvg >= 9000 {
+		return true
+	}
+
+	// During just-connected window, keep an extra conservative guard.
+	elapsed := time.Since(session.joinedAt)
+	if elapsed < 0 || elapsed > initialWakeWordIgnoreWindow {
+		return false
+	}
+	return shouldDropClippedWakeTurn(turn)
+}
+
+func isMostlyRepeatedWord(text string) bool {
+	parts := strings.Fields(strings.ToLower(strings.TrimSpace(text)))
+	if len(parts) < 4 {
+		return false
+	}
+	counts := make(map[string]int, len(parts))
+	total := 0
+	maxCount := 0
+	for _, part := range parts {
+		token := strings.Trim(part, ".,!?;:'\"()[]{}<>，。！？；：“”‘’")
+		if token == "" {
+			continue
+		}
+		total++
+		counts[token]++
+		if counts[token] > maxCount {
+			maxCount = counts[token]
+		}
+	}
+	if total < 4 {
+		return false
+	}
+	// Treat as suspicious when one token dominates the transcript.
+	return float64(maxCount)/float64(total) >= 0.7
 }
 
 func retryTranscriptWithStrongGain(ctx context.Context, stt sttStage, turn *turnBuffer) (string, error) {

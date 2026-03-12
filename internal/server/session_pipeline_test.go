@@ -224,6 +224,85 @@ func TestTruncateTTSTextByMaxOutputTokens(t *testing.T) {
 	}
 }
 
+func TestSplitTTSTextForStreamingBySentence(t *testing.T) {
+	text := "Hello there. How are you today? I am fine!"
+	chunks := splitTTSTextForStreaming(text, 120)
+	if len(chunks) != 3 {
+		t.Fatalf("chunk count mismatch: got=%d want=%d", len(chunks), 3)
+	}
+	if chunks[0] != "Hello there." {
+		t.Fatalf("chunk[0] mismatch: got=%q", chunks[0])
+	}
+	if chunks[1] != "How are you today?" {
+		t.Fatalf("chunk[1] mismatch: got=%q", chunks[1])
+	}
+	if chunks[2] != "I am fine!" {
+		t.Fatalf("chunk[2] mismatch: got=%q", chunks[2])
+	}
+}
+
+func TestSplitTTSTextForStreamingLongPlainText(t *testing.T) {
+	text := "one two three four five six seven eight nine ten eleven twelve"
+	chunks := splitTTSTextForStreaming(text, 10)
+	if len(chunks) < 2 {
+		t.Fatalf("expected long plain text to be split, got %d chunk(s)", len(chunks))
+	}
+	for i, chunk := range chunks {
+		if chunk == "" {
+			t.Fatalf("chunk[%d] is empty", i)
+		}
+	}
+}
+
+func TestShouldReuseInterimTranscriptForFinal(t *testing.T) {
+	turn := &turnBuffer{
+		frames:                      make([][]byte, 30),
+		frameDurationMS:             60,
+		speechFrameCount:            10,
+		interimLastSpeechFrameCount: 10,
+		interimLastText:             "hello from interim",
+		interimFrameLen:             20,
+		interimUpdates:              2,
+	}
+	got, ok := shouldReuseInterimTranscriptForFinal(turn, "silence_timeout")
+	if !ok {
+		t.Fatalf("expected interim transcript to be reusable")
+	}
+	if got != "hello from interim" {
+		t.Fatalf("unexpected transcript: got=%q", got)
+	}
+}
+
+func TestShouldReuseInterimTranscriptForFinalRejectsWhenSpeechAdvanced(t *testing.T) {
+	turn := &turnBuffer{
+		frames:                      make([][]byte, 24),
+		frameDurationMS:             60,
+		speechFrameCount:            12,
+		interimLastSpeechFrameCount: 9,
+		interimLastText:             "stale interim",
+		interimFrameLen:             18,
+		interimUpdates:              1,
+	}
+	if _, ok := shouldReuseInterimTranscriptForFinal(turn, "silence_timeout"); ok {
+		t.Fatalf("did not expect reuse when new speech happened after interim")
+	}
+}
+
+func TestShouldReuseInterimTranscriptForFinalRejectsOnMaxTurnTimeout(t *testing.T) {
+	turn := &turnBuffer{
+		frames:                      make([][]byte, 22),
+		frameDurationMS:             60,
+		speechFrameCount:            9,
+		interimLastSpeechFrameCount: 9,
+		interimLastText:             "hello",
+		interimFrameLen:             20,
+		interimUpdates:              2,
+	}
+	if _, ok := shouldReuseInterimTranscriptForFinal(turn, "max_turn_timeout"); ok {
+		t.Fatalf("did not expect reuse on max_turn_timeout")
+	}
+}
+
 func TestShouldDropLikelyHallucinatedTranscript(t *testing.T) {
 	turn := &turnBuffer{
 		frames:           make([][]byte, 37),
@@ -275,6 +354,160 @@ func TestShouldDropMaxTurnTimeoutTranscript(t *testing.T) {
 	}
 }
 
+func TestShouldDropSilenceTimeoutTranscript(t *testing.T) {
+	turn := &turnBuffer{
+		frames:           make([][]byte, 18),
+		speechFrameCount: 18,
+		maxFramePeak:     1152,
+		maxFrameAvg:      128,
+		interimUpdates:   0,
+		wakeWord:         "",
+	}
+	if !shouldDropSilenceTimeoutTranscript("silence_timeout", turn, "He's auder.") {
+		t.Fatalf("expected low-confidence silence-timeout transcript to be dropped")
+	}
+}
+
+func TestShouldDropSilenceTimeoutTranscriptKeepsLikelySpeech(t *testing.T) {
+	turn := &turnBuffer{
+		frames:           make([][]byte, 20),
+		speechFrameCount: 20,
+		maxFramePeak:     3200,
+		maxFrameAvg:      320,
+		interimUpdates:   0,
+		wakeWord:         "",
+	}
+	if shouldDropSilenceTimeoutTranscript("silence_timeout", turn, "what time is it") {
+		t.Fatalf("did not expect stronger speech transcript to be dropped")
+	}
+
+	turn.maxFramePeak = 1152
+	turn.maxFrameAvg = 128
+	turn.interimUpdates = 1
+	if shouldDropSilenceTimeoutTranscript("silence_timeout", turn, "what time is it") {
+		t.Fatalf("did not expect drop with interim evidence")
+	}
+}
+
+func TestShouldDropSilenceTimeoutTranscriptDropsSaturatedShortWakeWordBurst(t *testing.T) {
+	turn := &turnBuffer{
+		frames:           make([][]byte, 13),
+		speechFrameCount: 13,
+		maxFramePeak:     32768,
+		maxFrameAvg:      12469,
+		interimUpdates:   0,
+		wakeWord:         "Alfredo",
+	}
+	if !shouldDropSilenceTimeoutTranscript("silence_timeout", turn, "What?") {
+		t.Fatalf("expected saturated wake-word burst transcript to be dropped")
+	}
+}
+
+func TestShouldDropSilenceTimeoutTranscriptDropsSaturatedShortNonWakeWordBurst(t *testing.T) {
+	turn := &turnBuffer{
+		frames:           make([][]byte, 25),
+		speechFrameCount: 25,
+		maxFramePeak:     30282,
+		maxFrameAvg:      10130,
+		interimUpdates:   0,
+		wakeWord:         "",
+	}
+	if !shouldDropSilenceTimeoutTranscript("silence_timeout", turn, "you") {
+		t.Fatalf("expected saturated short non-wake transcript to be dropped")
+	}
+}
+
+func TestShouldDropSilenceTimeoutTranscriptDropsSaturatedHeavyClipping(t *testing.T) {
+	turn := &turnBuffer{
+		frames:           make([][]byte, 11),
+		speechFrameCount: 11,
+		maxFramePeak:     32768,
+		maxFrameAvg:      14959,
+		interimUpdates:   0,
+		wakeWord:         "",
+	}
+	text := "Imm Imm Imm Imm Imm Imm Imm Imm Imm Imm"
+	if !shouldDropSilenceTimeoutTranscript("silence_timeout", turn, text) {
+		t.Fatalf("expected heavy clipping silence-timeout transcript to be dropped")
+	}
+}
+
+func TestShouldDropSilenceTimeoutTranscriptDropsSaturatedRepeatedWordNoise(t *testing.T) {
+	turn := &turnBuffer{
+		frames:           make([][]byte, 80),
+		speechFrameCount: 80,
+		maxFramePeak:     32768,
+		maxFrameAvg:      12000,
+		interimUpdates:   0,
+		wakeWord:         "",
+	}
+	text := "worshipped worshipped worshipped worshipped worshipped worshipped"
+	if !shouldDropSilenceTimeoutTranscript("silence_timeout", turn, text) {
+		t.Fatalf("expected saturated repeated-word noise transcript to be dropped")
+	}
+}
+
+func TestShouldDropSilenceTimeoutTranscriptDropsLowEnergyRepeatedWordNoise(t *testing.T) {
+	turn := &turnBuffer{
+		frames:           make([][]byte, 6),
+		speechFrameCount: 5,
+		maxFramePeak:     707,
+		maxFrameAvg:      116,
+		interimUpdates:   0,
+		wakeWord:         "",
+	}
+	text := "Ms Ms Ms Ms Ms Ms Ms Ms"
+	if !shouldDropSilenceTimeoutTranscript("silence_timeout", turn, text) {
+		t.Fatalf("expected low-energy repeated-word noise transcript to be dropped")
+	}
+}
+
+func TestShouldDropClippedWakeTurn(t *testing.T) {
+	turn := &turnBuffer{
+		frames:           make([][]byte, 80),
+		speechFrameCount: 80,
+		maxFramePeak:     32768,
+		maxFrameAvg:      13666,
+		wakeWord:         "Alfredo",
+	}
+	if !shouldDropClippedWakeTurn(turn) {
+		t.Fatalf("expected clipped wake turn to be dropped")
+	}
+
+	turn.maxFrameAvg = 7000
+	if shouldDropClippedWakeTurn(turn) {
+		t.Fatalf("did not expect non-clipped avg to be dropped")
+	}
+
+	turn.maxFrameAvg = 13666
+	turn.wakeWord = ""
+	if shouldDropClippedWakeTurn(turn) {
+		t.Fatalf("did not expect non-wake turn to be dropped")
+	}
+}
+
+func TestShouldDropSevereClippedNoiseTurn(t *testing.T) {
+	turn := &turnBuffer{
+		maxFramePeak: 32768,
+		maxFrameAvg:  13135,
+		wakeWord:     "",
+	}
+	if !shouldDropSevereClippedNoiseTurn(turn) {
+		t.Fatalf("expected severe clipped non-wake turn to be dropped")
+	}
+
+	turn.maxFrameAvg = 9000
+	if shouldDropSevereClippedNoiseTurn(turn) {
+		t.Fatalf("did not expect non-severe clipping to be dropped")
+	}
+
+	turn.maxFrameAvg = 13135
+	turn.wakeWord = "Alfredo"
+	if shouldDropSevereClippedNoiseTurn(turn) {
+		t.Fatalf("did not expect wake-word turn to be dropped by non-wake rule")
+	}
+}
+
 func TestShouldDropRepeatedLoopTranscript(t *testing.T) {
 	turn := &turnBuffer{
 		frames:           make([][]byte, 60),
@@ -323,5 +556,82 @@ func TestCollapseRepeatedSentencesKeepsDistinctContent(t *testing.T) {
 	got := collapseRepeatedSentences(in)
 	if got != in {
 		t.Fatalf("expected unchanged transcript, got=%q want=%q", got, in)
+	}
+}
+
+func TestShouldShortcutToStandby(t *testing.T) {
+	tests := []struct {
+		name       string
+		transcript string
+		wantHit    bool
+		wantCmd    string
+	}{
+		{
+			name:       "go sleep",
+			transcript: "alfredo, go sleep.",
+			wantHit:    true,
+			wantCmd:    "go sleep",
+		},
+		{
+			name:       "stop",
+			transcript: "Alfredo, stop.",
+			wantHit:    true,
+			wantCmd:    "stop",
+		},
+		{
+			name:       "sleep",
+			transcript: "alfredo, sleep",
+			wantHit:    true,
+			wantCmd:    "sleep",
+		},
+		{
+			name:       "shutup no space",
+			transcript: "alfredo,shutup",
+			wantHit:    true,
+			wantCmd:    "shutup",
+		},
+		{
+			name:       "shut up with space",
+			transcript: "alfredo, shut up!",
+			wantHit:    true,
+			wantCmd:    "shut up",
+		},
+		{
+			name:       "go to sleep",
+			transcript: "alfredo go to sleep",
+			wantHit:    true,
+			wantCmd:    "go to sleep",
+		},
+		{
+			name:       "missing wake word",
+			transcript: "go sleep",
+			wantHit:    false,
+		},
+		{
+			name:       "extra words",
+			transcript: "alfredo stop the music",
+			wantHit:    false,
+		},
+		{
+			name:       "wake word not first",
+			transcript: "hey alfredo stop",
+			wantHit:    false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotHit, gotCmd := shouldShortcutToStandby(tc.transcript)
+			if gotHit != tc.wantHit || gotCmd != tc.wantCmd {
+				t.Fatalf(
+					"shouldShortcutToStandby(%q) = (%v, %q), want (%v, %q)",
+					tc.transcript,
+					gotHit,
+					gotCmd,
+					tc.wantHit,
+					tc.wantCmd,
+				)
+			}
+		})
 	}
 }

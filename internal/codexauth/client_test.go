@@ -116,6 +116,27 @@ func TestNormalizeOnlineFlag(t *testing.T) {
 	}
 }
 
+func TestNormalizeTextVerbosityForModel(t *testing.T) {
+	tests := []struct {
+		model string
+		raw   string
+		want  string
+	}{
+		{model: "gpt-5.2-codex", raw: "", want: "medium"},
+		{model: "gpt-5.2-codex", raw: "low", want: "medium"},
+		{model: "gpt-5.2-codex", raw: "high", want: "medium"},
+		{model: "gpt-5.2-codex", raw: "medium", want: "medium"},
+		{model: "gpt-5.1-codex", raw: "low", want: "low"},
+		{model: "gpt-5.1-codex", raw: "high", want: "high"},
+	}
+
+	for _, tc := range tests {
+		if got := NormalizeTextVerbosityForModel(tc.model, tc.raw); got != tc.want {
+			t.Fatalf("NormalizeTextVerbosityForModel(%q, %q) = %q, want %q", tc.model, tc.raw, got, tc.want)
+		}
+	}
+}
+
 func TestBuildInputMessagesIncludesHistory(t *testing.T) {
 	client := &Client{
 		maxHistory: defaultHistoryLimit,

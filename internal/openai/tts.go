@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -57,12 +59,19 @@ func (s *SpeechSynthesizer) SynthesizeWithOptions(
 		}
 	}
 
-	body, err := json.Marshal(map[string]any{
+	payload := map[string]any{
 		"model":           s.model,
 		"voice":           voice,
 		"input":           text,
 		"response_format": "wav",
-	})
+	}
+	if options != nil {
+		if speed, ok := parseOpenAITTSSpeed(options["rate"]); ok {
+			payload["speed"] = speed
+		}
+	}
+
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal tts request failed: %w", err)
 	}
@@ -80,12 +89,28 @@ func (s *SpeechSynthesizer) SynthesizeWithOptions(
 	}
 	defer resp.Body.Close()
 
-	payload, err := io.ReadAll(io.LimitReader(resp.Body, 32*1024*1024))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 32*1024*1024))
 	if err != nil {
 		return nil, fmt.Errorf("read tts response failed: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, parseAPIError("tts", resp.StatusCode, payload)
+		return nil, parseAPIError("tts", resp.StatusCode, respBody)
 	}
-	return payload, nil
+	return respBody, nil
+}
+
+func parseOpenAITTSSpeed(raw string) (float64, bool) {
+	rate, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || rate <= 0 {
+		return 0, false
+	}
+
+	speed := float64(rate) / 220.0
+	if speed < 0.25 {
+		speed = 0.25
+	}
+	if speed > 4.0 {
+		speed = 4.0
+	}
+	return math.Round(speed*100) / 100, true
 }

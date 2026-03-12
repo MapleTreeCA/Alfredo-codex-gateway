@@ -23,7 +23,7 @@ func TestLoadRuntimeConfigFromStoreMergesWithFallback(t *testing.T) {
 		Verbosity:            "medium",
 		Online:               true,
 		Concise:              true,
-		MaxOutputTokens:      500,
+		MaxOutputTokens:      1000,
 		ContextMessages:      10,
 		MemoryRecallDays:     30,
 		TTSVoice:             "Daniel",
@@ -88,7 +88,7 @@ func TestPatchRuntimeConfigPersistsToSQLite(t *testing.T) {
 			Verbosity:            "medium",
 			Online:               true,
 			Concise:              true,
-			MaxOutputTokens:      500,
+			MaxOutputTokens:      1000,
 			ContextMessages:      10,
 			MemoryRecallDays:     30,
 			TTSVoice:             "Daniel",
@@ -178,5 +178,16 @@ func TestPatchRuntimeConfigPersistsToSQLite(t *testing.T) {
 	}
 	if persisted.STTStreamingEnabled || persisted.STTInterimIntervalMS != 650 || persisted.STTInterimMinAudioMS != 1000 {
 		t.Fatalf("persisted runtime stt mismatch: %+v", persisted)
+	}
+}
+
+func TestSanitizeRuntimeConfigClampsVerbosityForGPT52Codex(t *testing.T) {
+	got := sanitizeRuntimeConfig(runtimeConfig{
+		Model:     "gpt-5.2-codex",
+		Effort:    "medium",
+		Verbosity: "low",
+	})
+	if got.Verbosity != "medium" {
+		t.Fatalf("verbosity = %q, want %q", got.Verbosity, "medium")
 	}
 }

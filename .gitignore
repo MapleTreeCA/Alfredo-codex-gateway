@@ -29,3 +29,4 @@ openai.json
 # OS/editor noise
 .DS_Store
 .vscode/
+logs/*

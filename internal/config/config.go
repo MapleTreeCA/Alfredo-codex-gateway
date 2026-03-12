@@ -32,46 +32,48 @@ const (
 	defaultOpenClawSession    = "alfredo"
 	defaultSTTModel           = "gpt-4o-mini-transcribe"
 	defaultMLXWhisperModel    = "mlx-community/whisper-large-v3-turbo"
+	defaultMLXResidentTimeout = 8 * time.Second
 	defaultTTSModel           = "tts-1"
 	defaultTTSVoice           = "alloy"
 	defaultLocalTTSVoice      = "Daniel"
-	defaultLocalTTSRate       = 220
+	defaultLocalTTSRate       = 180
 	defaultCodexModel         = "gpt-5.1-codex"
-	defaultCodexMaxOutput     = 500
+	defaultCodexMaxOutput     = 1000
 	defaultOpusFrameDuration  = 60
-	defaultSessionSilence     = 1200 * time.Millisecond
-	defaultSessionMaxTurn     = 15 * time.Second
+	defaultSessionSilence     = 900 * time.Millisecond
+	defaultSessionMaxTurn     = 12 * time.Second
 	defaultTTSMaxDuration     = 3 * time.Minute
 	defaultSTTStreaming       = true
-	defaultSTTInterimInterval = 900 * time.Millisecond
-	defaultSTTInterimMinAudio = 1200 * time.Millisecond
+	defaultSTTInterimInterval = 600 * time.Millisecond
+	defaultSTTInterimMinAudio = 700 * time.Millisecond
 	defaultOAuthRedirectURI   = "http://localhost:1455/auth/callback"
 	defaultSTTTimeout         = 45 * time.Second
 	defaultTTSTimeout         = 45 * time.Second
 	defaultCodexTimeout       = 90 * time.Second
 	defaultDownlinkRate       = 24000
-	defaultDownlinkBitrate    = 24000
+	defaultDownlinkBitrate    = 32000
 	defaultMemoryContextSize  = 10
 )
 
 type Config struct {
-	ListenAddr          string
-	WSPath              string
-	WSToken             string
-	LLMProvider         string
-	STTProvider         string
-	TTSProvider         string
-	SessionSilence      time.Duration
-	SessionMaxTurn      time.Duration
-	TTSMaxDuration      time.Duration
-	STTStreamingEnabled bool
-	STTInterimInterval  time.Duration
-	STTInterimMinAudio  time.Duration
-	DownlinkSampleRate  int
-	DownlinkOpusBitrate int
-	OpusFrameDuration   int
-	MemoryDir           string
-	MemoryContextSize   int
+	ListenAddr                string
+	WSPath                    string
+	WSToken                   string
+	LLMProvider               string
+	STTProvider               string
+	TTSProvider               string
+	SessionSilence            time.Duration
+	SessionMaxTurn            time.Duration
+	TTSMaxDuration            time.Duration
+	STTStreamingEnabled       bool
+	STTInterimInterval        time.Duration
+	STTInterimMinAudio        time.Duration
+	DownlinkSampleRate        int
+	DownlinkOpusBitrate       int
+	OpusFrameDuration         int
+	RuntimeConfigResetOnStart bool
+	MemoryDir                 string
+	MemoryContextSize         int
 
 	OpenAIAPIKey              string
 	OpenAIBaseURL             string
@@ -80,6 +82,8 @@ type Config struct {
 	STTTimeout                time.Duration
 	MLXWhisperBin             string
 	MLXWhisperModel           string
+	MLXWhisperResidentEnabled bool
+	MLXWhisperResidentTimeout time.Duration
 	LocalSTTAddr              string
 	TTSModel                  string
 	TTSVoice                  string
@@ -146,38 +150,47 @@ func Load() Config {
 	}
 
 	return Config{
-		ListenAddr:          envString("GATEWAY_LISTEN_ADDR", defaultListenAddr),
-		WSPath:              normalizePath(envString("GATEWAY_WS_PATH", defaultWSPath)),
-		WSToken:             strings.TrimSpace(os.Getenv("GATEWAY_WS_TOKEN")),
-		LLMProvider:         llmProvider,
-		STTProvider:         sttProvider,
-		TTSProvider:         ttsProvider,
-		SessionSilence:      envDuration("GATEWAY_SESSION_SILENCE", defaultSessionSilence),
-		SessionMaxTurn:      envDuration("GATEWAY_SESSION_MAX_TURN", defaultSessionMaxTurn),
-		TTSMaxDuration:      envDuration("GATEWAY_TTS_MAX_DURATION", defaultTTSMaxDuration),
-		STTStreamingEnabled: envBool("GATEWAY_STT_STREAMING_ENABLED", defaultSTTStreaming),
-		STTInterimInterval:  envDuration("GATEWAY_STT_INTERIM_INTERVAL", defaultSTTInterimInterval),
-		STTInterimMinAudio:  envDuration("GATEWAY_STT_INTERIM_MIN_AUDIO", defaultSTTInterimMinAudio),
-		DownlinkSampleRate:  envInt("GATEWAY_DOWNLINK_SAMPLE_RATE", defaultDownlinkRate),
-		DownlinkOpusBitrate: envInt("GATEWAY_DOWNLINK_OPUS_BITRATE", defaultDownlinkBitrate),
-		OpusFrameDuration:   envInt("GATEWAY_OPUS_FRAME_DURATION_MS", defaultOpusFrameDuration),
-		MemoryDir:           envString("GATEWAY_MEMORY_DIR", defaultMemoryDir()),
-		MemoryContextSize:   envInt("GATEWAY_MEMORY_CONTEXT_SIZE", defaultMemoryContextSize),
-		OpenAIAPIKey:        strings.TrimSpace(os.Getenv("OPENAI_API_KEY")),
-		OpenAIBaseURL:       strings.TrimRight(envString("OPENAI_BASE_URL", defaultOpenAIBaseURL), "/"),
-		STTModel:            envString("OPENAI_STT_MODEL", defaultSTTModel),
-		STTLanguage:         sttLanguage,
-		STTTimeout:          envDuration("OPENAI_STT_TIMEOUT", defaultSTTTimeout),
-		MLXWhisperBin:       envString("GATEWAY_MLX_WHISPER_BIN", "mlx_whisper"),
-		MLXWhisperModel:     envString("GATEWAY_MLX_WHISPER_MODEL", defaultMLXWhisperModel),
-		LocalSTTAddr:        envString("GATEWAY_LOCAL_STT_ADDR", defaultLocalSTTAddr),
-		TTSModel:            envString("OPENAI_TTS_MODEL", defaultTTSModel),
-		TTSVoice:            envString("OPENAI_TTS_VOICE", defaultTTSVoice),
-		TTSTimeout:          envDuration("OPENAI_TTS_TIMEOUT", defaultTTSTimeout),
-		LocalTTSAddr:        envString("GATEWAY_LOCAL_TTS_ADDR", defaultLocalTTSAddr),
-		LocalTTSVoice:       envString("GATEWAY_LOCAL_TTS_VOICE", defaultLocalTTSVoice),
-		LocalTTSRate:        envInt("GATEWAY_LOCAL_TTS_RATE", defaultLocalTTSRate),
-		LocalTTSSampleRate:  envInt("GATEWAY_LOCAL_TTS_SAMPLE_RATE", defaultDownlinkRate),
+		ListenAddr:                envString("GATEWAY_LISTEN_ADDR", defaultListenAddr),
+		WSPath:                    normalizePath(envString("GATEWAY_WS_PATH", defaultWSPath)),
+		WSToken:                   strings.TrimSpace(os.Getenv("GATEWAY_WS_TOKEN")),
+		LLMProvider:               llmProvider,
+		STTProvider:               sttProvider,
+		TTSProvider:               ttsProvider,
+		SessionSilence:            envDuration("GATEWAY_SESSION_SILENCE", defaultSessionSilence),
+		SessionMaxTurn:            envDuration("GATEWAY_SESSION_MAX_TURN", defaultSessionMaxTurn),
+		TTSMaxDuration:            envDuration("GATEWAY_TTS_MAX_DURATION", defaultTTSMaxDuration),
+		STTStreamingEnabled:       envBool("GATEWAY_STT_STREAMING_ENABLED", defaultSTTStreaming),
+		STTInterimInterval:        envDuration("GATEWAY_STT_INTERIM_INTERVAL", defaultSTTInterimInterval),
+		STTInterimMinAudio:        envDuration("GATEWAY_STT_INTERIM_MIN_AUDIO", defaultSTTInterimMinAudio),
+		DownlinkSampleRate:        envInt("GATEWAY_DOWNLINK_SAMPLE_RATE", defaultDownlinkRate),
+		DownlinkOpusBitrate:       envInt("GATEWAY_DOWNLINK_OPUS_BITRATE", defaultDownlinkBitrate),
+		OpusFrameDuration:         envInt("GATEWAY_OPUS_FRAME_DURATION_MS", defaultOpusFrameDuration),
+		RuntimeConfigResetOnStart: envBool("GATEWAY_RUNTIME_CONFIG_RESET_ON_START", false),
+		MemoryDir:                 envString("GATEWAY_MEMORY_DIR", defaultMemoryDir()),
+		MemoryContextSize:         envInt("GATEWAY_MEMORY_CONTEXT_SIZE", defaultMemoryContextSize),
+		OpenAIAPIKey:              strings.TrimSpace(os.Getenv("OPENAI_API_KEY")),
+		OpenAIBaseURL:             strings.TrimRight(envString("OPENAI_BASE_URL", defaultOpenAIBaseURL), "/"),
+		STTModel:                  envString("OPENAI_STT_MODEL", defaultSTTModel),
+		STTLanguage:               sttLanguage,
+		STTTimeout:                envDuration("OPENAI_STT_TIMEOUT", defaultSTTTimeout),
+		MLXWhisperBin:             envString("GATEWAY_MLX_WHISPER_BIN", "mlx_whisper"),
+		MLXWhisperModel:           envString("GATEWAY_MLX_WHISPER_MODEL", defaultMLXWhisperModel),
+		MLXWhisperResidentEnabled: envBool(
+			"GATEWAY_MLX_WHISPER_RESIDENT_ENABLED",
+			true,
+		),
+		MLXWhisperResidentTimeout: envDuration(
+			"GATEWAY_MLX_WHISPER_RESIDENT_TIMEOUT",
+			defaultMLXResidentTimeout,
+		),
+		LocalSTTAddr:       envString("GATEWAY_LOCAL_STT_ADDR", defaultLocalSTTAddr),
+		TTSModel:           envString("OPENAI_TTS_MODEL", defaultTTSModel),
+		TTSVoice:           envString("OPENAI_TTS_VOICE", defaultTTSVoice),
+		TTSTimeout:         envDuration("OPENAI_TTS_TIMEOUT", defaultTTSTimeout),
+		LocalTTSAddr:       envString("GATEWAY_LOCAL_TTS_ADDR", defaultLocalTTSAddr),
+		LocalTTSVoice:      envString("GATEWAY_LOCAL_TTS_VOICE", defaultLocalTTSVoice),
+		LocalTTSRate:       envInt("GATEWAY_LOCAL_TTS_RATE", defaultLocalTTSRate),
+		LocalTTSSampleRate: envInt("GATEWAY_LOCAL_TTS_SAMPLE_RATE", defaultDownlinkRate),
 		LocalModuleStartupTimeout: envDuration(
 			"GATEWAY_LOCAL_MODULE_STARTUP_TIMEOUT",
 			defaultLocalModuleWait,
@@ -296,6 +309,9 @@ func (c Config) Validate() error {
 		}
 		if strings.TrimSpace(c.MLXWhisperModel) == "" {
 			problems = append(problems, "GATEWAY_MLX_WHISPER_MODEL is empty")
+		}
+		if c.MLXWhisperResidentEnabled && c.MLXWhisperResidentTimeout <= 0 {
+			problems = append(problems, "GATEWAY_MLX_WHISPER_RESIDENT_TIMEOUT must be > 0")
 		}
 	}
 	if c.STTProvider == "local" && strings.TrimSpace(c.LocalSTTAddr) == "" {

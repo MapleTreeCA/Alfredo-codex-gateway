@@ -232,6 +232,12 @@ function fillSelect(el, values, selectedValue) {
   }
 }
 
+function defaultVerbosityOptionsForModel(model) {
+  return String(model || "").trim().toLowerCase() === "gpt-5.2-codex"
+    ? ["medium"]
+    : ["low", "medium", "high"];
+}
+
 function selectedOrFallback(selectEl, fallback = "") {
   if (!selectEl) return fallback;
   const value = String(selectEl.value || "").trim();
@@ -265,7 +271,7 @@ function currentMemoryRecallDaysValue() {
 
 function currentMaxOutputTokensValue() {
   const value = Number.parseInt(String(maxOutputTokensInputEl?.value || "0"), 10);
-  if (!Number.isFinite(value) || value <= 0) return 500;
+  if (!Number.isFinite(value) || value <= 0) return 1000;
   return Math.max(1, Math.min(8192, value));
 }
 
@@ -276,19 +282,19 @@ function clampedIntInputValue(inputEl, fallback, min, max) {
 }
 
 function currentSessionSilenceMSValue() {
-  return clampedIntInputValue(sessionSilenceMSInputEl, 1200, 200, 10000);
+  return clampedIntInputValue(sessionSilenceMSInputEl, 900, 200, 10000);
 }
 
 function currentSessionMaxTurnMSValue() {
-  return clampedIntInputValue(sessionMaxTurnMSInputEl, 15000, 2000, 120000);
+  return clampedIntInputValue(sessionMaxTurnMSInputEl, 12000, 2000, 120000);
 }
 
 function currentSTTInterimIntervalMSValue() {
-  return clampedIntInputValue(sttInterimIntervalMSInputEl, 900, 200, 10000);
+  return clampedIntInputValue(sttInterimIntervalMSInputEl, 600, 200, 10000);
 }
 
 function currentSTTInterimMinAudioMSValue() {
-  return clampedIntInputValue(sttInterimMinAudioMSInputEl, 1200, 200, 30000);
+  return clampedIntInputValue(sttInterimMinAudioMSInputEl, 700, 200, 30000);
 }
 
 function applyRuntimeConfig(cfg) {
@@ -299,10 +305,22 @@ function applyRuntimeConfig(cfg) {
   if (modelCustomInputEl) {
     modelCustomInputEl.value = modelOptions.includes(currentModel) ? "" : currentModel;
   }
-  if (effortSelectEl) effortSelectEl.value = String(cfg.effort || effortSelectEl.value || "medium");
-  if (verbositySelectEl) verbositySelectEl.value = String(cfg.verbosity || verbositySelectEl.value || "medium");
+  if (effortSelectEl) {
+    fillSelect(
+      effortSelectEl,
+      Array.isArray(cfg.effort_options) ? cfg.effort_options : ["low", "medium", "high"],
+      String(cfg.effort || effortSelectEl.value || "medium"),
+    );
+  }
+  if (verbositySelectEl) {
+    fillSelect(
+      verbositySelectEl,
+      Array.isArray(cfg.verbosity_options) ? cfg.verbosity_options : defaultVerbosityOptionsForModel(currentModel),
+      String(cfg.verbosity || verbositySelectEl.value || "medium"),
+    );
+  }
   if (maxOutputTokensInputEl) {
-    maxOutputTokensInputEl.value = String(cfg.max_output_tokens || currentMaxOutputTokensValue() || 500);
+    maxOutputTokensInputEl.value = String(cfg.max_output_tokens || currentMaxOutputTokensValue() || 1000);
   }
   if (contextMessagesInputEl) {
     contextMessagesInputEl.value = String(cfg.context_messages || currentContextMessagesValue() || 10);
@@ -311,10 +329,10 @@ function applyRuntimeConfig(cfg) {
     memoryRecallDaysInputEl.value = String(cfg.memory_recall_days || currentMemoryRecallDaysValue() || 30);
   }
   if (sessionSilenceMSInputEl) {
-    sessionSilenceMSInputEl.value = String(cfg.session_silence_ms || currentSessionSilenceMSValue() || 1200);
+    sessionSilenceMSInputEl.value = String(cfg.session_silence_ms || currentSessionSilenceMSValue() || 900);
   }
   if (sessionMaxTurnMSInputEl) {
-    sessionMaxTurnMSInputEl.value = String(cfg.session_max_turn_ms || currentSessionMaxTurnMSValue() || 15000);
+    sessionMaxTurnMSInputEl.value = String(cfg.session_max_turn_ms || currentSessionMaxTurnMSValue() || 12000);
   }
   if (onlineSearchCheckbox) onlineSearchCheckbox.checked = Boolean(cfg.online);
   if (conciseEnabledCheckbox) {
@@ -331,12 +349,12 @@ function applyRuntimeConfig(cfg) {
   if (ttsVoiceCustomInputEl) {
     ttsVoiceCustomInputEl.value = voiceOptions.includes(currentVoice) ? "" : currentVoice;
   }
-  if (ttsRateInputEl) ttsRateInputEl.value = String(cfg.tts_rate || 220);
+  if (ttsRateInputEl) ttsRateInputEl.value = String(cfg.tts_rate || 180);
   if (sttInterimIntervalMSInputEl) {
-    sttInterimIntervalMSInputEl.value = String(cfg.stt_interim_interval_ms || currentSTTInterimIntervalMSValue() || 900);
+    sttInterimIntervalMSInputEl.value = String(cfg.stt_interim_interval_ms || currentSTTInterimIntervalMSValue() || 600);
   }
   if (sttInterimMinAudioMSInputEl) {
-    sttInterimMinAudioMSInputEl.value = String(cfg.stt_interim_min_audio_ms || currentSTTInterimMinAudioMSValue() || 1200);
+    sttInterimMinAudioMSInputEl.value = String(cfg.stt_interim_min_audio_ms || currentSTTInterimMinAudioMSValue() || 700);
   }
 }
 
@@ -835,6 +853,16 @@ sdConfigInputEl?.addEventListener("input", () => {
 showDiagnosticsCheckbox?.addEventListener("change", () => {
   window.localStorage.setItem(diagnosticsStorageKey, showDiagnosticsCheckbox.checked ? "1" : "0");
   setDiagnosticsStatus(null, 0, 0);
+});
+modelSelectEl?.addEventListener("change", () => {
+  if (!verbositySelectEl) return;
+  const selected = String(verbositySelectEl.value || "").trim();
+  fillSelect(verbositySelectEl, defaultVerbosityOptionsForModel(currentModelValue()), selected || "medium");
+});
+modelCustomInputEl?.addEventListener("input", () => {
+  if (!verbositySelectEl) return;
+  const selected = String(verbositySelectEl.value || "").trim();
+  fillSelect(verbositySelectEl, defaultVerbosityOptionsForModel(currentModelValue()), selected || "medium");
 });
 sidebarToggleBtn?.addEventListener("click", () => {
   const collapsed = !consoleLayoutEl?.classList.contains("sidebar-collapsed");

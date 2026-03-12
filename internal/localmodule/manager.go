@@ -27,6 +27,7 @@ type Manager struct {
 	mu        sync.Mutex
 	sttServer *http.Server
 	ttsServer *http.Server
+	sttCloser io.Closer
 }
 
 func New(cfg config.Config) *Manager {
@@ -51,9 +52,16 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	m.mu.Lock()
 	stt := m.sttServer
 	tts := m.ttsServer
+	sttCloser := m.sttCloser
+	m.sttCloser = nil
 	m.mu.Unlock()
 
 	var errs []string
+	if sttCloser != nil {
+		if err := sttCloser.Close(); err != nil {
+			errs = append(errs, fmt.Sprintf("close local stt worker failed: %v", err))
+		}
+	}
 	if stt != nil {
 		if err := stt.Shutdown(ctx); err != nil {
 			errs = append(errs, fmt.Sprintf("shutdown local stt module failed: %v", err))
@@ -83,6 +91,7 @@ func (m *Manager) ensureSTTModule(ctx context.Context) error {
 	}
 
 	transcriber := mlxwhisper.NewTranscriber(m.cfg)
+	closer, _ := any(transcriber).(io.Closer)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok\n"))
@@ -120,6 +129,7 @@ func (m *Manager) ensureSTTModule(ctx context.Context) error {
 	}
 	m.mu.Lock()
 	m.sttServer = server
+	m.sttCloser = closer
 	m.mu.Unlock()
 	log.Printf("local stt module started on %s", m.cfg.LocalSTTAddr)
 	return nil

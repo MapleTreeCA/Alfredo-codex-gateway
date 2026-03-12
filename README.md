@@ -63,6 +63,8 @@ The console supports:
 
 - gateway starts built-in local STT module (`/transcribe`)
 - gateway starts built-in local TTS module (`/synthesize`)
+- local STT keeps a resident `mlx_whisper` python worker to reuse loaded model (can disable by env)
+- gateway voice pipeline streams TTS in sentence-sized chunks to reduce first-audio latency
 - startup checks module health; if not running, it starts them automatically
 
 ## Requirements
@@ -88,9 +90,10 @@ export GATEWAY_STT_PROVIDER=openai
 export GATEWAY_TTS_PROVIDER=openai
 export GATEWAY_MEMORY_DIR=$HOME/.gateway-memory
 export GATEWAY_MEMORY_CONTEXT_SIZE=10
+export GATEWAY_SESSION_SILENCE=900ms
 export GATEWAY_STT_STREAMING_ENABLED=true
-export GATEWAY_STT_INTERIM_INTERVAL=900ms
-export GATEWAY_STT_INTERIM_MIN_AUDIO=1200ms
+export GATEWAY_STT_INTERIM_INTERVAL=600ms
+export GATEWAY_STT_INTERIM_MIN_AUDIO=700ms
 ```
 
 `GATEWAY_MEMORY_DIR` stores SQLite memory DB at `<dir>/memory.sqlite3` by default.
@@ -102,6 +105,8 @@ export GATEWAY_STT_PROVIDER=local
 export GATEWAY_TTS_PROVIDER=local
 export GATEWAY_MLX_WHISPER_BIN=mlx_whisper
 export GATEWAY_MLX_WHISPER_MODEL=mlx-community/whisper-large-v3-turbo
+export GATEWAY_MLX_WHISPER_RESIDENT_ENABLED=true
+export GATEWAY_MLX_WHISPER_RESIDENT_TIMEOUT=8s
 export GATEWAY_LOCAL_STT_ADDR=127.0.0.1:19610
 export GATEWAY_LOCAL_TTS_ADDR=127.0.0.1:19611
 export GATEWAY_LOCAL_TTS_VOICE='Daniel' # default English male voice
@@ -173,6 +178,21 @@ go run ./cmd/codex-gateway
 ```bash
 cd /Users/dev/robot/m5stack/gateway
 ./scripts/start-alfredo-gateway.sh
+```
+
+Build then run with logs (defaults: `llm=codex stt=local tts=local`):
+
+```bash
+cd /Users/dev/robot/m5stack/gateway
+./scripts/build-run-gateway.sh
+```
+
+Build then run in background:
+
+```bash
+cd /Users/dev/robot/m5stack/gateway
+./scripts/build-run-gateway.sh --daemon
+tail -f logs/gateway-*.log
 ```
 
 Run in background:

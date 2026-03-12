@@ -36,24 +36,27 @@ var (
 		"o3-mini",
 	}
 	defaultEffortOptions = []string{"low", "medium", "high"}
-	defaultVerbosity     = []string{"low", "medium", "high"}
 )
 
 const (
-	defaultCodexClientVersion   = "0.1.0"
-	modelCatalogCacheTTL        = 5 * time.Minute
-	defaultContextMessages      = 10
-	maxContextMessages          = 200
-	defaultMemoryRecallDays     = 30
-	maxMemoryRecallDays         = 365
-	defaultConcise              = true
-	defaultMaxOutputTokens      = 500
-	minMaxOutputTokens          = 1
-	maxMaxOutputTokens          = 8192
-	defaultSessionSilenceMS     = 1200
-	defaultSessionMaxTurnMS     = 15000
-	defaultSTTInterimIntervalMS = 900
-	defaultSTTInterimMinAudioMS = 1200
+	defaultCodexClientVersion = "0.1.0"
+	modelCatalogCacheTTL      = 5 * time.Minute
+	defaultContextMessages    = 10
+	maxContextMessages        = 200
+	defaultMemoryRecallDays   = 30
+	maxMemoryRecallDays       = 365
+	defaultConcise            = true
+	defaultMaxOutputTokens    = 1000
+	minMaxOutputTokens        = 1
+	maxMaxOutputTokens        = 8192
+	// End a turn after this much trailing silence, then run final STT -> LLM -> TTS.
+	defaultSessionSilenceMS = 900
+	// Hard-stop a turn at this length even if speech/noise keeps going.
+	defaultSessionMaxTurnMS = 12000
+	// Minimum wall-clock gap between interim STT requests while streaming.
+	defaultSTTInterimIntervalMS = 600
+	// Minimum captured audio before interim STT can trigger.
+	defaultSTTInterimMinAudioMS = 700
 	minSessionSilenceMS         = 200
 	maxSessionSilenceMS         = 10000
 	minSessionMaxTurnMS         = 2000
@@ -65,23 +68,40 @@ const (
 )
 
 type runtimeConfig struct {
-	Model                string `json:"model"`
-	Effort               string `json:"effort"`
-	Verbosity            string `json:"verbosity"`
-	Online               bool   `json:"online"`
-	Concise              bool   `json:"concise"`
-	MaxOutputTokens      int    `json:"max_output_tokens"`
-	ContextMessages      int    `json:"context_messages"`
-	MemoryRecallDays     int    `json:"memory_recall_days"`
-	TTSVoice             string `json:"tts_voice"`
-	TTSRate              int    `json:"tts_rate"`
-	SessionSilenceMS     int    `json:"session_silence_ms"`
-	SessionMaxTurnMS     int    `json:"session_max_turn_ms"`
-	STTStreamingEnabled  bool   `json:"stt_streaming_enabled"`
-	STTInterimIntervalMS int    `json:"stt_interim_interval_ms"`
-	STTInterimMinAudioMS int    `json:"stt_interim_min_audio_ms"`
+	// Model is the Codex/LLM model slug used for final text generation.
+	Model string `json:"model"`
+	// Effort controls the reasoning depth requested from the model.
+	Effort string `json:"effort"`
+	// Verbosity controls how wordy the model is allowed to be.
+	Verbosity string `json:"verbosity"`
+	// Online enables tools/web-backed behavior when the model/provider supports it.
+	Online bool `json:"online"`
+	// Concise asks the model to keep answers shorter by default.
+	Concise bool `json:"concise"`
+	// MaxOutputTokens caps model text output before TTS sees it.
+	MaxOutputTokens int `json:"max_output_tokens"`
+	// ContextMessages is the number of recent dialogue messages sent to the LLM.
+	ContextMessages int `json:"context_messages"`
+	// MemoryRecallDays limits how many days of stored memory can be recalled into context.
+	MemoryRecallDays int `json:"memory_recall_days"`
+	// TTSVoice is the voice name used by the configured TTS provider.
+	TTSVoice string `json:"tts_voice"`
+	// TTSRate is the speech rate sent to the TTS provider.
+	TTSRate int `json:"tts_rate"`
+	// SessionSilenceMS is the silence window that finalizes a turn and sends it to STT/LLM.
+	SessionSilenceMS int `json:"session_silence_ms"`
+	// SessionMaxTurnMS is the hard upper bound for one turn of captured audio.
+	SessionMaxTurnMS int `json:"session_max_turn_ms"`
+	// STTStreamingEnabled enables interim STT updates while the user is still speaking.
+	STTStreamingEnabled bool `json:"stt_streaming_enabled"`
+	// STTInterimIntervalMS is the minimum time gap between interim STT requests.
+	STTInterimIntervalMS int `json:"stt_interim_interval_ms"`
+	// STTInterimMinAudioMS is the minimum buffered audio required before interim STT can run.
+	STTInterimMinAudioMS int `json:"stt_interim_min_audio_ms"`
 }
 
+// runtimeConfigPatchRequest uses pointer fields so HTTP PATCH can omit untouched values.
+// Field meanings are identical to runtimeConfig.
 type runtimeConfigPatchRequest struct {
 	Model                *string `json:"model"`
 	Effort               *string `json:"effort"`
@@ -100,29 +120,33 @@ type runtimeConfigPatchRequest struct {
 	STTInterimMinAudioMS *int    `json:"stt_interim_min_audio_ms"`
 }
 
+// runtimeConfigResponse returns the active config plus UI option catalogs.
+// Field meanings are identical to runtimeConfig unless noted otherwise.
 type runtimeConfigResponse struct {
-	Model                string   `json:"model"`
-	Effort               string   `json:"effort"`
-	Verbosity            string   `json:"verbosity"`
-	Online               bool     `json:"online"`
-	Concise              bool     `json:"concise"`
-	MaxOutputTokens      int      `json:"max_output_tokens"`
-	ContextMessages      int      `json:"context_messages"`
-	MemoryRecallDays     int      `json:"memory_recall_days"`
-	TTSVoice             string   `json:"tts_voice"`
-	TTSRate              int      `json:"tts_rate"`
-	SessionSilenceMS     int      `json:"session_silence_ms"`
-	SessionMaxTurnMS     int      `json:"session_max_turn_ms"`
-	STTStreamingEnabled  bool     `json:"stt_streaming_enabled"`
-	STTInterimIntervalMS int      `json:"stt_interim_interval_ms"`
-	STTInterimMinAudioMS int      `json:"stt_interim_min_audio_ms"`
-	ModelOptions         []string `json:"model_options"`
-	ModelOptionsSource   string   `json:"model_options_source"`
-	EffortOptions        []string `json:"effort_options"`
-	VerbosityOptions     []string `json:"verbosity_options"`
-	VoiceOptions         []string `json:"voice_options"`
-	ENVoiceOptions       []string `json:"en_voice_options"`
-	RecommendedENMales   []string `json:"recommended_en_male_voices"`
+	Model                string `json:"model"`
+	Effort               string `json:"effort"`
+	Verbosity            string `json:"verbosity"`
+	Online               bool   `json:"online"`
+	Concise              bool   `json:"concise"`
+	MaxOutputTokens      int    `json:"max_output_tokens"`
+	ContextMessages      int    `json:"context_messages"`
+	MemoryRecallDays     int    `json:"memory_recall_days"`
+	TTSVoice             string `json:"tts_voice"`
+	TTSRate              int    `json:"tts_rate"`
+	SessionSilenceMS     int    `json:"session_silence_ms"`
+	SessionMaxTurnMS     int    `json:"session_max_turn_ms"`
+	STTStreamingEnabled  bool   `json:"stt_streaming_enabled"`
+	STTInterimIntervalMS int    `json:"stt_interim_interval_ms"`
+	STTInterimMinAudioMS int    `json:"stt_interim_min_audio_ms"`
+	// ModelOptions is the selectable model list exposed to the runtime config UI.
+	ModelOptions []string `json:"model_options"`
+	// ModelOptionsSource tells whether model options came from static defaults or live fetch.
+	ModelOptionsSource string   `json:"model_options_source"`
+	EffortOptions      []string `json:"effort_options"`
+	VerbosityOptions   []string `json:"verbosity_options"`
+	VoiceOptions       []string `json:"voice_options"`
+	ENVoiceOptions     []string `json:"en_voice_options"`
+	RecommendedENMales []string `json:"recommended_en_male_voices"`
 }
 
 type voiceCatalog struct {
@@ -265,12 +289,7 @@ func sanitizeRuntimeConfig(next runtimeConfig) runtimeConfig {
 	default:
 		next.Effort = "medium"
 	}
-	switch strings.ToLower(strings.TrimSpace(next.Verbosity)) {
-	case "low", "medium", "high":
-		next.Verbosity = strings.ToLower(strings.TrimSpace(next.Verbosity))
-	default:
-		next.Verbosity = "medium"
-	}
+	next.Verbosity = codexauth.NormalizeTextVerbosityForModel(next.Model, next.Verbosity)
 	next.MaxOutputTokens = clampInt(
 		next.MaxOutputTokens,
 		defaultMaxOutputTokens,
@@ -294,7 +313,7 @@ func sanitizeRuntimeConfig(next runtimeConfig) runtimeConfig {
 		next.TTSVoice = "Daniel"
 	}
 	if next.TTSRate <= 0 {
-		next.TTSRate = 220
+		next.TTSRate = 180
 	}
 	next.SessionSilenceMS = clampInt(next.SessionSilenceMS, defaultSessionSilenceMS, minSessionSilenceMS, maxSessionSilenceMS)
 	next.SessionMaxTurnMS = clampInt(next.SessionMaxTurnMS, defaultSessionMaxTurnMS, minSessionMaxTurnMS, maxSessionMaxTurnMS)
@@ -381,7 +400,7 @@ func (s *Server) runtimeConfigResponse(ctx context.Context, forceRefresh bool) r
 		ModelOptions:         models,
 		ModelOptionsSource:   source,
 		EffortOptions:        append([]string(nil), defaultEffortOptions...),
-		VerbosityOptions:     append([]string(nil), defaultVerbosity...),
+		VerbosityOptions:     codexauth.SupportedTextVerbosityOptions(current.Model),
 		VoiceOptions:         append([]string(nil), s.voiceCatalog.All...),
 		ENVoiceOptions:       append([]string(nil), s.voiceCatalog.EN...),
 		RecommendedENMales:   append([]string(nil), s.voiceCatalog.ENMale...),

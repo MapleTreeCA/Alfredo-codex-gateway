@@ -172,6 +172,49 @@ func TestDetachTurnKeepsMaxTimeoutWithInterimEvidence(t *testing.T) {
 	}
 }
 
+func TestDetachTurnKeepsWakeWordTurnWithoutAudio(t *testing.T) {
+	s := &Session{
+		id: "test-wake-no-audio",
+		currentTurn: &turnBuffer{
+			id:              5,
+			mode:            "auto",
+			wakeWord:        "Alfredo",
+			sampleRate:      16000,
+			frameDurationMS: 60,
+		},
+	}
+
+	turn, _, err := s.detachTurn("wake_word_capture_timeout")
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if turn == nil {
+		t.Fatalf("expected wake-word turn to continue without audio")
+	}
+	if turn.id != 5 || turn.wakeWord != "Alfredo" {
+		t.Fatalf("unexpected turn: %+v", turn)
+	}
+}
+
+func TestHandleListenStartDefersWhenPipelineActive(t *testing.T) {
+	s := &Session{
+		id:           "test-defer-listen-start",
+		activeTurnID: 42,
+	}
+
+	s.handleListenStart("auto")
+
+	if s.currentTurn != nil {
+		t.Fatalf("expected no new turn while active turn is running")
+	}
+	if !s.pendingRestartTurn {
+		t.Fatalf("expected pending restart flag to be set")
+	}
+	if s.pendingRestartMode != "auto" {
+		t.Fatalf("expected pending restart mode auto, got: %s", s.pendingRestartMode)
+	}
+}
+
 func totalFrameBytes(frames [][]byte) int {
 	total := 0
 	for _, frame := range frames {

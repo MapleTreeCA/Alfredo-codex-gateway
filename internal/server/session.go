@@ -20,25 +20,31 @@ import (
 )
 
 const (
-	minSpeechFramesPerTurn  = 2
-	noiseWarmupFrameCount   = 6
-	minSpeechFrameAvgAbs    = 8
-	minSpeechFramePeak      = 45
-	maxDynamicNoiseBaseline = 20
-	fallbackTurnAvgAbs      = 22
-	fallbackTurnPeak        = 220
-	interimMinChunkCount    = 2
-	interimMinChunkDelta    = 2
-	interimMaxTimeout       = 8 * time.Second
-	interimDefaultTimeout   = 6 * time.Second
-	interimIdleMinTimeout   = 900 * time.Millisecond
-	interimIdleMaxTimeout   = 1200 * time.Millisecond
-	initialNoAudioGrace     = 7000 * time.Millisecond
+	minSpeechFramesPerTurn    = 2
+	noiseWarmupFrameCount     = 6
+	minSpeechFrameAvgAbs      = 8
+	minSpeechFramePeak        = 45
+	maxDynamicNoiseBaseline   = 20
+	fallbackTurnAvgAbs        = 22
+	fallbackTurnPeak          = 220
+	interimMinChunkCount      = 2
+	interimMinChunkDelta      = 2
+	interimMaxTimeout         = 8 * time.Second
+	interimDefaultTimeout     = 6 * time.Second
+	interimIdleMinTimeout     = 900 * time.Millisecond
+	interimIdleMaxTimeout     = 1200 * time.Millisecond
+	initialNoAudioGrace       = 7000 * time.Millisecond
 	restartTurnDelayAfterDrop = 700 * time.Millisecond
-	strongSpeechFrameAvg    = 180
-	strongSpeechFramePeak   = 700
-	maxTimeoutSpeechRatio   = 0.66
-	minTimeoutInterimUpdate = 2
+	strongSpeechFrameAvg      = 180
+	strongSpeechFramePeak     = 700
+	maxTimeoutSpeechRatio     = 0.66
+	minTimeoutInterimUpdate   = 2
+	sessionIdleTimeout        = 180 * time.Second
+	// Ignore wake-word detect events briefly after a fresh websocket connect.
+	// This suppresses false wake-ups commonly seen during reconnect/restart windows.
+	initialWakeWordIgnoreWindow = 2500 * time.Millisecond
+	// Capture a short wake-word turn window, then reply immediately.
+	wakeWordCaptureDuration = 700 * time.Millisecond
 )
 
 type envelope struct {
@@ -58,26 +64,27 @@ type envelope struct {
 }
 
 type turnBuffer struct {
-	id               uint64
-	mode             string
-	wakeWord         string
-	sampleRate       int
-	frameDurationMS  int
-	frames           [][]byte
-	audioBytes       int
-	speechDetected   bool
-	speechFrameCount int
-	speechStreak     int
-	noiseAvgSum      int64
-	noiseAvgCount    int
-	maxFrameAvg      int
-	maxFramePeak     int
-	interimInFlight  bool
-	interimLastAt    time.Time
-	interimLastText  string
-	interimFrameLen  int
-	interimUpdates   int
-	startedAt        time.Time
+	id                          uint64
+	mode                        string
+	wakeWord                    string
+	sampleRate                  int
+	frameDurationMS             int
+	frames                      [][]byte
+	audioBytes                  int
+	speechDetected              bool
+	speechFrameCount            int
+	speechStreak                int
+	noiseAvgSum                 int64
+	noiseAvgCount               int
+	maxFrameAvg                 int
+	maxFramePeak                int
+	interimInFlight             bool
+	interimLastAt               time.Time
+	interimLastText             string
+	interimLastSpeechFrameCount int
+	interimFrameLen             int
+	interimUpdates              int
+	startedAt                   time.Time
 }
 
 type Session struct {
@@ -115,6 +122,7 @@ type Session struct {
 	vadDecoder         *gopus.Decoder
 	vadSampleRate      int
 	vadFrameMS         int
+	idleTimer          *time.Timer
 }
 
 func newSession(server *Server, conn *websocket.Conn, req *http.Request) *Session {
@@ -154,6 +162,11 @@ func (s *Session) run() {
 	)
 	s.server.registerSession(s)
 
+	s.idleTimer = time.AfterFunc(sessionIdleTimeout, func() {
+		log.Printf("session=%s idle timeout (%v), closing", s.id, sessionIdleTimeout)
+		_ = s.conn.Close()
+	})
+
 	for {
 		messageType, payload, err := s.conn.ReadMessage()
 		if err != nil {
@@ -163,6 +176,8 @@ func (s *Session) run() {
 			log.Printf("session=%s read failed: %v", s.id, err)
 			return
 		}
+
+		s.idleTimer.Reset(sessionIdleTimeout)
 
 		switch messageType {
 		case websocket.TextMessage:
@@ -196,6 +211,9 @@ func (s *Session) close() {
 	}
 	if s.interimIdleTimer != nil {
 		s.interimIdleTimer.Stop()
+	}
+	if s.idleTimer != nil {
+		s.idleTimer.Stop()
 	}
 	if s.activeCancel != nil {
 		s.activeCancel()
@@ -304,19 +322,61 @@ func (s *Session) primeLLM() {
 func (s *Session) handleListen(msg envelope) error {
 	switch msg.State {
 	case "detect":
+		wakeWord := strings.TrimSpace(msg.Text)
 		s.mu.Lock()
-		s.pendingWakeWord = strings.TrimSpace(msg.Text)
+		s.pendingWakeWord = wakeWord
 		s.mu.Unlock()
-		log.Printf("session=%s wake_word=%q", s.id, strings.TrimSpace(msg.Text))
+		log.Printf("session=%s wake_word=%q", s.id, wakeWord)
 		return nil
 	case "start":
-		s.startTurn(msg.Mode)
+		s.handleListenStart(msg.Mode)
 		return nil
 	case "stop":
 		return s.finalizeTurn("device_stop")
 	default:
 		return fmt.Errorf("unsupported listen state %q", msg.State)
 	}
+}
+
+func (s *Session) handleListenStart(mode string) {
+	normalizedMode := normalizeMode(mode)
+
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	if s.currentTurn != nil {
+		currentTurnID := s.currentTurn.id
+		currentMode := s.currentTurn.mode
+		s.mu.Unlock()
+		log.Printf(
+			"session=%s listen.start ignored current_turn=%d current_mode=%s requested_mode=%s",
+			s.id,
+			currentTurnID,
+			currentMode,
+			normalizedMode,
+		)
+		return
+	}
+	if s.activeTurnID != 0 || s.speaking {
+		s.pendingRestartTurn = true
+		s.pendingRestartMode = normalizedMode
+		activeTurnID := s.activeTurnID
+		speaking := s.speaking
+		s.mu.Unlock()
+		log.Printf(
+			"session=%s listen.start deferred active_turn=%d speaking=%t mode=%s",
+			s.id,
+			activeTurnID,
+			speaking,
+			normalizedMode,
+		)
+		return
+	}
+	s.mu.Unlock()
+
+	s.startTurn(normalizedMode)
 }
 
 func (s *Session) handleAbort() error {
@@ -368,7 +428,8 @@ func (s *Session) handleBinary(payload []byte) error {
 		if s.currentTurn.speechStreak >= minSpeechFramesPerTurn {
 			s.currentTurn.speechDetected = true
 		}
-		if s.currentTurn.mode == "auto" || s.currentTurn.mode == "realtime" {
+		if (s.currentTurn.mode == "auto" || s.currentTurn.mode == "realtime") &&
+			strings.TrimSpace(s.currentTurn.wakeWord) == "" {
 			s.armSilenceTimerLocked(s.currentTurn.id)
 		}
 	} else {
@@ -404,7 +465,9 @@ func (s *Session) startTurn(mode string) {
 	}
 	s.resetVADLocked()
 	s.armMaxTurnTimerLocked(s.currentTurn.id)
-	if s.currentTurn.mode == "auto" || s.currentTurn.mode == "realtime" {
+	if strings.TrimSpace(s.currentTurn.wakeWord) != "" {
+		s.armWakeWordFinalizeTimerLocked(s.currentTurn.id)
+	} else if s.currentTurn.mode == "auto" || s.currentTurn.mode == "realtime" {
 		s.armSilenceTimerLocked(s.currentTurn.id)
 	}
 	log.Printf("session=%s turn=%d start mode=%s wake_word=%q", s.id, s.currentTurn.id, s.currentTurn.mode, s.currentTurn.wakeWord)
@@ -431,7 +494,8 @@ func (s *Session) detachTurn(reason string) (*turnBuffer, context.Context, error
 	if s.currentTurn == nil {
 		return nil, nil, errNoTurn
 	}
-	if len(s.currentTurn.frames) == 0 {
+	wakeTurn := strings.TrimSpace(s.currentTurn.wakeWord) != ""
+	if len(s.currentTurn.frames) == 0 && !wakeTurn {
 		log.Printf(
 			"session=%s turn=%d drop reason=%s no_audio frames=0 audio_bytes=%d speech_frames=%d",
 			s.id,
@@ -452,19 +516,90 @@ func (s *Session) detachTurn(reason string) (*turnBuffer, context.Context, error
 		}
 		return nil, nil, errNoTurn
 	}
-	peak, avg, sampleCount, hasSpeech, statsErr := turnPCMStats(s.currentTurn)
-	if s.currentTurn.speechDetected && statsErr == nil {
-		weakFrameEvidence := s.currentTurn.speechFrameCount < minSpeechFramesForStrongEvidence(len(s.currentTurn.frames)) &&
-			s.currentTurn.maxFrameAvg < fallbackTurnAvgAbs &&
-			s.currentTurn.maxFramePeak < fallbackTurnPeak
-		weakSpeechEvidence := s.currentTurn.speechFrameCount < minSpeechFramesForStrongEvidence(len(s.currentTurn.frames)) &&
-			s.currentTurn.maxFrameAvg < strongSpeechFrameAvg &&
-			s.currentTurn.maxFramePeak < strongSpeechFramePeak
-		if weakSpeechEvidence {
+	peak, avg, sampleCount, hasSpeech := 0, 0, 0, false
+	statsErr := error(nil)
+	if len(s.currentTurn.frames) > 0 {
+		peak, avg, sampleCount, hasSpeech, statsErr = turnPCMStats(s.currentTurn)
+	}
+	if !wakeTurn {
+		if s.currentTurn.speechDetected && statsErr == nil {
+			weakFrameEvidence := s.currentTurn.speechFrameCount < minSpeechFramesForStrongEvidence(len(s.currentTurn.frames)) &&
+				s.currentTurn.maxFrameAvg < fallbackTurnAvgAbs &&
+				s.currentTurn.maxFramePeak < fallbackTurnPeak
+			weakSpeechEvidence := s.currentTurn.speechFrameCount < minSpeechFramesForStrongEvidence(len(s.currentTurn.frames)) &&
+				s.currentTurn.maxFrameAvg < strongSpeechFrameAvg &&
+				s.currentTurn.maxFramePeak < strongSpeechFramePeak
+			if weakSpeechEvidence {
+				log.Printf(
+					"session=%s turn=%d revoke speech by weak evidence frames=%d audio_bytes=%d speech_frames=%d max_frame_peak=%d max_frame_avg=%d pcm_peak=%d pcm_avg=%d pcm_samples=%d pcm_has_speech=%t",
+					s.id,
+					s.currentTurn.id,
+					len(s.currentTurn.frames),
+					s.currentTurn.audioBytes,
+					s.currentTurn.speechFrameCount,
+					s.currentTurn.maxFramePeak,
+					s.currentTurn.maxFrameAvg,
+					peak,
+					avg,
+					sampleCount,
+					hasSpeech,
+				)
+				s.currentTurn.speechDetected = false
+			}
+			if weakFrameEvidence {
+				log.Printf(
+					"session=%s turn=%d revoke speech by pcm stats frames=%d audio_bytes=%d speech_frames=%d max_frame_peak=%d max_frame_avg=%d pcm_peak=%d pcm_avg=%d pcm_samples=%d",
+					s.id,
+					s.currentTurn.id,
+					len(s.currentTurn.frames),
+					s.currentTurn.audioBytes,
+					s.currentTurn.speechFrameCount,
+					s.currentTurn.maxFramePeak,
+					s.currentTurn.maxFrameAvg,
+					peak,
+					avg,
+					sampleCount,
+				)
+				s.currentTurn.speechDetected = false
+			}
+		}
+		if !s.currentTurn.speechDetected && statsErr == nil {
+			if hasSpeech || avg >= fallbackTurnAvgAbs || peak >= fallbackTurnPeak {
+				s.currentTurn.speechDetected = true
+				log.Printf(
+					"session=%s turn=%d speech promoted by turn stats frames=%d audio_bytes=%d speech_frames=%d max_frame_peak=%d max_frame_avg=%d pcm_peak=%d pcm_avg=%d pcm_samples=%d pcm_has_speech=%t",
+					s.id,
+					s.currentTurn.id,
+					len(s.currentTurn.frames),
+					s.currentTurn.audioBytes,
+					s.currentTurn.speechFrameCount,
+					s.currentTurn.maxFramePeak,
+					s.currentTurn.maxFrameAvg,
+					peak,
+					avg,
+					sampleCount,
+					hasSpeech,
+				)
+			}
+		}
+		streamingEnabled := s.runtimeSTTStreamingEnabled()
+		if shouldDropMaxTurnTimeoutTurn(
+			reason,
+			s.currentTurn,
+			peak,
+			avg,
+			hasSpeech,
+			streamingEnabled,
+		) {
+			statsErrText := ""
+			if statsErr != nil {
+				statsErrText = statsErr.Error()
+			}
 			log.Printf(
-				"session=%s turn=%d revoke speech by weak evidence frames=%d audio_bytes=%d speech_frames=%d max_frame_peak=%d max_frame_avg=%d pcm_peak=%d pcm_avg=%d pcm_samples=%d pcm_has_speech=%t",
+				"session=%s turn=%d drop reason=%s weak_timeout_speech frames=%d audio_bytes=%d speech_frames=%d max_frame_peak=%d max_frame_avg=%d pcm_peak=%d pcm_avg=%d pcm_samples=%d pcm_has_speech=%t interim_updates=%d pcm_err=%q",
 				s.id,
 				s.currentTurn.id,
+				reason,
 				len(s.currentTurn.frames),
 				s.currentTurn.audioBytes,
 				s.currentTurn.speechFrameCount,
@@ -474,33 +609,31 @@ func (s *Session) detachTurn(reason string) (*turnBuffer, context.Context, error
 				avg,
 				sampleCount,
 				hasSpeech,
+				s.currentTurn.interimUpdates,
+				statsErrText,
 			)
-			s.currentTurn.speechDetected = false
+			s.currentTurn = nil
+			if s.silenceTimer != nil {
+				s.silenceTimer.Stop()
+			}
+			if s.maxTurnTimer != nil {
+				s.maxTurnTimer.Stop()
+			}
+			if s.interimIdleTimer != nil {
+				s.interimIdleTimer.Stop()
+			}
+			return nil, nil, errNoTurn
 		}
-		if weakFrameEvidence {
+		if !s.currentTurn.speechDetected {
+			statsErrText := ""
+			if statsErr != nil {
+				statsErrText = statsErr.Error()
+			}
 			log.Printf(
-				"session=%s turn=%d revoke speech by pcm stats frames=%d audio_bytes=%d speech_frames=%d max_frame_peak=%d max_frame_avg=%d pcm_peak=%d pcm_avg=%d pcm_samples=%d",
+				"session=%s turn=%d drop reason=%s no_speech frames=%d audio_bytes=%d speech_frames=%d max_frame_peak=%d max_frame_avg=%d pcm_peak=%d pcm_avg=%d pcm_samples=%d pcm_has_speech=%t pcm_err=%q",
 				s.id,
 				s.currentTurn.id,
-				len(s.currentTurn.frames),
-				s.currentTurn.audioBytes,
-				s.currentTurn.speechFrameCount,
-				s.currentTurn.maxFramePeak,
-				s.currentTurn.maxFrameAvg,
-				peak,
-				avg,
-				sampleCount,
-			)
-			s.currentTurn.speechDetected = false
-		}
-	}
-	if !s.currentTurn.speechDetected && statsErr == nil {
-		if hasSpeech || avg >= fallbackTurnAvgAbs || peak >= fallbackTurnPeak {
-			s.currentTurn.speechDetected = true
-			log.Printf(
-				"session=%s turn=%d speech promoted by turn stats frames=%d audio_bytes=%d speech_frames=%d max_frame_peak=%d max_frame_avg=%d pcm_peak=%d pcm_avg=%d pcm_samples=%d pcm_has_speech=%t",
-				s.id,
-				s.currentTurn.id,
+				reason,
 				len(s.currentTurn.frames),
 				s.currentTurn.audioBytes,
 				s.currentTurn.speechFrameCount,
@@ -510,83 +643,20 @@ func (s *Session) detachTurn(reason string) (*turnBuffer, context.Context, error
 				avg,
 				sampleCount,
 				hasSpeech,
+				statsErrText,
 			)
+			s.currentTurn = nil
+			if s.silenceTimer != nil {
+				s.silenceTimer.Stop()
+			}
+			if s.maxTurnTimer != nil {
+				s.maxTurnTimer.Stop()
+			}
+			if s.interimIdleTimer != nil {
+				s.interimIdleTimer.Stop()
+			}
+			return nil, nil, errNoTurn
 		}
-	}
-	streamingEnabled := s.runtimeSTTStreamingEnabled()
-	if shouldDropMaxTurnTimeoutTurn(
-		reason,
-		s.currentTurn,
-		peak,
-		avg,
-		hasSpeech,
-		streamingEnabled,
-	) {
-		statsErrText := ""
-		if statsErr != nil {
-			statsErrText = statsErr.Error()
-		}
-		log.Printf(
-			"session=%s turn=%d drop reason=%s weak_timeout_speech frames=%d audio_bytes=%d speech_frames=%d max_frame_peak=%d max_frame_avg=%d pcm_peak=%d pcm_avg=%d pcm_samples=%d pcm_has_speech=%t interim_updates=%d pcm_err=%q",
-			s.id,
-			s.currentTurn.id,
-			reason,
-			len(s.currentTurn.frames),
-			s.currentTurn.audioBytes,
-			s.currentTurn.speechFrameCount,
-			s.currentTurn.maxFramePeak,
-			s.currentTurn.maxFrameAvg,
-			peak,
-			avg,
-			sampleCount,
-			hasSpeech,
-			s.currentTurn.interimUpdates,
-			statsErrText,
-		)
-		s.currentTurn = nil
-		if s.silenceTimer != nil {
-			s.silenceTimer.Stop()
-		}
-		if s.maxTurnTimer != nil {
-			s.maxTurnTimer.Stop()
-		}
-		if s.interimIdleTimer != nil {
-			s.interimIdleTimer.Stop()
-		}
-		return nil, nil, errNoTurn
-	}
-	if !s.currentTurn.speechDetected {
-		statsErrText := ""
-		if statsErr != nil {
-			statsErrText = statsErr.Error()
-		}
-		log.Printf(
-			"session=%s turn=%d drop reason=%s no_speech frames=%d audio_bytes=%d speech_frames=%d max_frame_peak=%d max_frame_avg=%d pcm_peak=%d pcm_avg=%d pcm_samples=%d pcm_has_speech=%t pcm_err=%q",
-			s.id,
-			s.currentTurn.id,
-			reason,
-			len(s.currentTurn.frames),
-			s.currentTurn.audioBytes,
-			s.currentTurn.speechFrameCount,
-			s.currentTurn.maxFramePeak,
-			s.currentTurn.maxFrameAvg,
-			peak,
-			avg,
-			sampleCount,
-			hasSpeech,
-			statsErrText,
-		)
-		s.currentTurn = nil
-		if s.silenceTimer != nil {
-			s.silenceTimer.Stop()
-		}
-		if s.maxTurnTimer != nil {
-			s.maxTurnTimer.Stop()
-		}
-		if s.interimIdleTimer != nil {
-			s.interimIdleTimer.Stop()
-		}
-		return nil, nil, errNoTurn
 	}
 	turn := s.currentTurn
 	s.currentTurn = nil
@@ -641,11 +711,12 @@ func (s *Session) maybeTriggerInterimSTTLocked() {
 	turnID := turn.id
 	sampleRate := turn.sampleRate
 	frameDurationMS := turn.frameDurationMS
+	speechFrameCount := turn.speechFrameCount
 	frames := cloneOpusFrames(turn.frames)
 	turn.interimInFlight = true
 	turn.interimLastAt = now
 
-	go s.processInterimSTT(turnID, sampleRate, frameDurationMS, frames)
+	go s.processInterimSTT(turnID, sampleRate, frameDurationMS, speechFrameCount, frames)
 }
 
 func shouldTriggerInterimSTT(
@@ -706,7 +777,11 @@ func cloneOpusFrames(frames [][]byte) [][]byte {
 	return cloned
 }
 
-func (s *Session) processInterimSTT(turnID uint64, sampleRate, frameDurationMS int, frames [][]byte) {
+func (s *Session) processInterimSTT(
+	turnID uint64,
+	sampleRate, frameDurationMS, speechFrameCount int,
+	frames [][]byte,
+) {
 	transcript, err := s.transcribeFrames(sampleRate, frameDurationMS, frames)
 	transcript = strings.TrimSpace(transcript)
 
@@ -717,6 +792,7 @@ func (s *Session) processInterimSTT(turnID uint64, sampleRate, frameDurationMS i
 		currentTurn.interimInFlight = false
 		currentTurn.interimFrameLen = len(frames)
 		if err == nil && transcript != "" {
+			currentTurn.interimLastSpeechFrameCount = speechFrameCount
 			s.armInterimIdleTimerLocked(currentTurn.id)
 		}
 		if err == nil && transcript != "" && transcript != currentTurn.interimLastText {
@@ -1005,6 +1081,23 @@ func (s *Session) armSilenceTimerLocked(turnID uint64) {
 		}
 		if err := s.finalizeTurn("silence_timeout"); err != nil && !errors.Is(err, errNoTurn) {
 			log.Printf("session=%s turn=%d auto finalize failed: %v", s.id, turnID, err)
+		}
+	})
+}
+
+func (s *Session) armWakeWordFinalizeTimerLocked(turnID uint64) {
+	if s.silenceTimer != nil {
+		s.silenceTimer.Stop()
+	}
+	s.silenceTimer = time.AfterFunc(wakeWordCaptureDuration, func() {
+		s.mu.Lock()
+		current := s.currentTurn
+		s.mu.Unlock()
+		if current == nil || current.id != turnID {
+			return
+		}
+		if err := s.finalizeTurn("wake_word_capture_timeout"); err != nil && !errors.Is(err, errNoTurn) {
+			log.Printf("session=%s turn=%d wake-word finalize failed: %v", s.id, turnID, err)
 		}
 	})
 }
