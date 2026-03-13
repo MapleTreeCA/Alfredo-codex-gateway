@@ -38,6 +38,8 @@ const (
 	minRecallQueryRunes     = 3
 	defaultMaxOutputTokens  = 500
 	conciseInstructionRule  = "Be concise."
+	codexMaxAttempts        = 2
+	codexRetryBackoff       = 350 * time.Millisecond
 )
 
 type Client struct {
@@ -298,34 +300,87 @@ func (c *Client) generate(
 		return resp, nil
 	}
 
-	resp, err := doRequest(body)
-	if err != nil {
-		return generateResult{}, err
-	}
-	defer resp.Body.Close()
+	for attempt := 1; attempt <= codexMaxAttempts; attempt++ {
+		resp, err := doRequest(body)
+		if err != nil {
+			if attempt < codexMaxAttempts && ctx.Err() == nil {
+				log.Printf("codex request transient error attempt=%d/%d: %v", attempt, codexMaxAttempts, err)
+				if !sleepWithContext(ctx, codexRetryBackoff) {
+					return generateResult{}, ctx.Err()
+				}
+				continue
+			}
+			return generateResult{}, err
+		}
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		errorBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
-		return generateResult{}, fmt.Errorf("codex api error (%d): %s", resp.StatusCode, strings.TrimSpace(string(errorBody)))
-	}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			errorBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+			_ = resp.Body.Close()
+			statusErr := fmt.Errorf("codex api error (%d): %s", resp.StatusCode, strings.TrimSpace(string(errorBody)))
+			if attempt < codexMaxAttempts && shouldRetryCodexStatus(resp.StatusCode) && ctx.Err() == nil {
+				log.Printf("codex transient status=%d attempt=%d/%d, retrying", resp.StatusCode, attempt, codexMaxAttempts)
+				if !sleepWithContext(ctx, codexRetryBackoff) {
+					return generateResult{}, ctx.Err()
+				}
+				continue
+			}
+			return generateResult{}, statusErr
+		}
 
-	streamResult, err := parseSSE(resp.Body)
-	if err != nil {
-		return generateResult{}, err
+		streamResult, err := parseSSE(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			if attempt < codexMaxAttempts && ctx.Err() == nil {
+				log.Printf("codex stream parse error attempt=%d/%d: %v", attempt, codexMaxAttempts, err)
+				if !sleepWithContext(ctx, codexRetryBackoff) {
+					return generateResult{}, ctx.Err()
+				}
+				continue
+			}
+			return generateResult{}, err
+		}
+		text := strings.TrimSpace(streamResult.Reply)
+		if text == "" {
+			return generateResult{}, errors.New("codex returned empty text")
+		}
+		if err := c.appendHistory(sessionID, userText, text); err != nil {
+			return generateResult{}, err
+		}
+		return generateResult{
+			Reply:          text,
+			Usage:          streamResult.Usage,
+			MemoryMessages: memoryMessages,
+			SentMessages:   len(inputMessages),
+		}, nil
 	}
-	text := strings.TrimSpace(streamResult.Reply)
-	if text == "" {
-		return generateResult{}, errors.New("codex returned empty text")
+	return generateResult{}, errors.New("codex generation failed after retries")
+}
+
+func shouldRetryCodexStatus(status int) bool {
+	switch status {
+	case http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
 	}
-	if err := c.appendHistory(sessionID, userText, text); err != nil {
-		return generateResult{}, err
+}
+
+func sleepWithContext(ctx context.Context, delay time.Duration) bool {
+	if delay <= 0 {
+		return ctx.Err() == nil
 	}
-	return generateResult{
-		Reply:          text,
-		Usage:          streamResult.Usage,
-		MemoryMessages: memoryMessages,
-		SentMessages:   len(inputMessages),
-	}, nil
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func (c *Client) ensureAuth(ctx context.Context) (authState, string, error) {

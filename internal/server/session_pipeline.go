@@ -79,6 +79,7 @@ var wakeWordAutoReplyChunks = []string{
 }
 
 const systemCommandStandby = "standby"
+const llmFailureFallbackText = "I got stuck for a moment. Please try again."
 
 var standbyVoiceCommandSet = map[string]struct{}{
 	"go sleep":    {},
@@ -353,6 +354,9 @@ func (p *defaultTurnPipeline) Run(ctx context.Context, session *Session, turn *t
 			llmOptions.Online,
 			err,
 		)
+		if fallbackErr := p.runLLMFailureFallback(ctx, session, turn, runtime, llmFailureFallbackText); fallbackErr != nil {
+			log.Printf("session=%s turn=%d llm fallback failed: %v", session.id, turn.id, fallbackErr)
+		}
 		return
 	}
 	log.Printf(
@@ -707,6 +711,69 @@ func (p *defaultTurnPipeline) runWakeWordAutoReply(
 		totalFrames,
 		time.Since(turn.startedAt).Round(time.Millisecond),
 	)
+}
+
+func (p *defaultTurnPipeline) runLLMFailureFallback(
+	ctx context.Context,
+	session *Session,
+	turn *turnBuffer,
+	runtime runtimeConfig,
+	fallback string,
+) error {
+	text := strings.TrimSpace(fallback)
+	if text == "" {
+		return nil
+	}
+	if err := session.sendPipelineJSON(ctx, turn.id, map[string]any{
+		"session_id": session.id,
+		"type":       "llm",
+		"emotion":    "sad",
+		"text":       text,
+	}); err != nil {
+		return err
+	}
+	if err := session.sendTTSStart(ctx, turn.id); err != nil {
+		return err
+	}
+	defer session.sendTTSStop(turn.id)
+	if err := session.sendPipelineJSON(ctx, turn.id, map[string]any{
+		"session_id": session.id,
+		"type":       "tts",
+		"state":      "sentence_start",
+		"text":       text,
+	}); err != nil {
+		return err
+	}
+	ttsOptions := ttsSynthesisOptions{
+		Voice: runtime.TTSVoice,
+		Rate:  runtime.TTSRate,
+	}
+	wav, err := p.tts.Process(ctx, text, ttsOptions)
+	if err != nil {
+		return err
+	}
+	downlink, err := p.downlink.Process(
+		wav,
+		session.downlinkSampleRate,
+		session.server.cfg.OpusFrameDuration,
+		session.server.cfg.DownlinkOpusBitrate,
+	)
+	if err != nil {
+		return err
+	}
+	for i, frame := range downlink.frames {
+		if err := session.sendBinary(ctx, turn.id, frame); err != nil {
+			return err
+		}
+		if i < len(downlink.frames)-1 && session.server.cfg.OpusFrameDuration > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(session.server.cfg.OpusFrameDuration) * time.Millisecond):
+			}
+		}
+	}
+	return nil
 }
 
 func shouldReuseInterimTranscriptForFinal(turn *turnBuffer, reason string) (string, bool) {

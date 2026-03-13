@@ -66,15 +66,15 @@ function buildDefaultSDConfigObject() {
     conversation: {
       aec_mode: "off",
       continue_listening_after_tts_stop: true,
-      post_tts_listen_guard_ms: 300,
-      tts_downlink_drain_quiet_ms: 240,
+      post_tts_listen_guard_ms: 1200,
+      tts_downlink_drain_quiet_ms: 600,
       wake_word_detection_in_listening: false,
       xiaozhi_compat_mode: false,
       mic_send_gate_enabled: true,
     },
     audio: {
-      output_volume: 70,
-      input_gain: 36,
+      output_volume: 100,
+      input_gain: 32,
       input_reference: false,
     },
   };
